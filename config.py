@@ -1,0 +1,69 @@
+"""Конфигурация маршрутизации признаков."""
+
+import json
+from typing import Any, Optional
+
+import numpy as np
+
+FEATURE_ROUTING = {
+    "delta_H_center_periphery": ("color.local", "Δ оттенка центр↔периферия (H)", "deg"),
+    "delta_S_center_periphery": ("color.local", "Δ насыщенности центр↔периферия (S)", "S_8bit"),
+    "delta_V_center_periphery": ("color.local", "Δ яркости центр↔периферия (V)", "V_8bit"),
+    "delta_V_left_right": ("color.local", "Δ яркости левая↔правая половины", "V_8bit"),
+    "delta_S_left_right": ("color.local", "Δ насыщенности левая↔правая половины", "S_8bit"),
+    "delta_V_top_bottom": ("color.local", "Δ яркости верх↔низ", "V_8bit"),
+    "delta_S_top_bottom": ("color.local", "Δ насыщенности верх↔низ", "S_8bit"),
+    "delta_V_inner_rim": ("color.local", "Δ яркости центр↔краевая зона (ободок)", "V_8bit"),
+    "percent_outlier_bright_pixels": ("color.local", "Доля аномально ярких пикселей", "ratio_0_1"),
+    "percent_outlier_dark_pixels": ("color.local", "Доля аномально тёмных пикселей", "ratio_0_1"),
+    "mean_H_lesion": ("color.global", "Средний оттенок H в очаге", "deg"),
+    "mean_S_lesion": ("color.global", "Средняя насыщенность S в очаге", "S_8bit"),
+    "mean_V_lesion": ("color.global", "Средняя яркость V в очаге", "V_8bit"),
+    "std_H_lesion": ("color.global", "Разброс оттенка H в очаге", "deg"),
+    "std_S_lesion": ("color.global", "Разброс насыщенности S в очаге", "S_8bit"),
+    "std_V_lesion": ("color.global", "Разброс яркости V в очаге", "V_8bit"),
+    "entropy_H_lesion": ("color.global", "Энтропия канала H в очаге", "abs"),
+    "entropy_S_lesion": ("color.global", "Энтропия канала S в очаге", "abs"),
+    "entropy_V_lesion": ("color.global", "Энтропия канала V в очаге", "abs"),
+    "color_balance_R": ("color.global", "Доля красного канала (R) среднего цвета", "ratio_0_1"),
+    "color_balance_G": ("color.global", "Доля зелёного канала (G) среднего цвета", "ratio_0_1"),
+    "color_balance_B": ("color.global", "Доля синего канала (B) среднего цвета", "ratio_0_1"),
+    "color_distance_euclidean": ("color.global", "LAB-расстояние очаг↔кожа (евклид.)", "Lab_euclid"),
+    "color_distance_deltaE": ("color.global", "ΔE2000 очаг↔кожа", "deltaE"),
+    "dominant_colors_lesion": ("color.global", "Топ-3 доминантных цвета очага (HSV)", "HSV_list"),
+    "percent_dark_pixels": ("color.global", "Доля очень тёмных пикселей", "ratio_0_1"),
+    "percent_white_pixels": ("color.global", "Доля белых/обесцвеченных пикселей", "ratio_0_1"),
+    "percent_red_pixels": ("color.global", "Доля красных пикселей", "ratio_0_1"),
+    "percent_blue_pixels": ("color.global", "Доля синих пикселей", "ratio_0_1"),
+    "area": ("shape", "Площадь маски (пиксели)", "px"),
+    "perimeter": ("shape", "Периметр маски", "px"),
+    "circularity": ("shape", "Круглость (1=идеально круглый)", "ratio_0_1"),
+    "aspect_ratio": ("shape", "Соотношение сторон (шир/выс)", "ratio"),
+    "eccentricity": ("shape", "Эксцентриситет (0..1)", "ratio_0_1"),
+    "solidity": ("shape", "Плотность к выпуклой оболочке", "ratio_0_1"),
+    "extent": ("shape", "Заполнение bbox (extent)", "ratio_0_1"),
+    "perimeter_area_ratio": ("border", "Периметр / sqrt(площади)", "ratio"),
+    "radial_variance": ("border", "Вариация радиуса до контура", "px2"),
+    "convexity": ("border", "Convexity (P/P_convex)", "ratio"),
+    "fractal_dimension": ("border", "Фрактальная размерность границы", "abs"),
+    "glcm_contrast": ("texture", "GLCM-контраст", "abs"),
+    "glcm_homogeneity": ("texture", "GLCM-однородность", "ratio_0_1"),
+    "glcm_energy": ("texture", "GLCM-энергия", "abs"),
+    "glcm_entropy": ("texture", "GLCM-энтропия", "abs"),
+    "lbp_uniformity": ("texture", "LBP-равномерность", "ratio"),
+    "lbp_entropy": ("texture", "LBP-энтропия", "abs"),
+    "lbp_mean": ("texture", "LBP-среднее", "abs"),
+    "lbp_std": ("texture", "LBP-стандартное отклонение", "abs"),
+    "lbp_median": ("texture", "LBP-медиана", "abs"),
+}
+
+
+def _safe_number(x: Any) -> Optional[float]:
+    """Извлечь число из значения (число, кортеж, список)."""
+    if isinstance(x, (int, float, np.number)):
+        return float(x)
+    if isinstance(x, (list, tuple)) and x:
+        v = x[0]
+        if isinstance(v, (int, float, np.number)):
+            return float(v)
+    return None
