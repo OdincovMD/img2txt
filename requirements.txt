@@ -10,3 +10,5 @@ ultralytics
 torch
 torchvision
 tqdm
+ipywidgets
+matplotlib

@@ -6,7 +6,7 @@ from typing import Optional
 
 import pandas as pd
 
-from threshold_config import THRESHOLDS, SCALAR, apply_threshold
+from config.threshold_config import THRESHOLDS, SCALAR, apply_threshold
 
 
 def _get_num(d: dict, key: str) -> Optional[float]:

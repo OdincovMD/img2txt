@@ -13,7 +13,7 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
-from importance_config import LABEL_NAMES, LABEL_TO_IDX, expert_string_to_label_key
+from config.importance_config import LABEL_NAMES, LABEL_TO_IDX, expert_string_to_label_key
 
 
 def parse_expert_labels(row, label_columns: Optional[List[str]] = None) -> List[str]:

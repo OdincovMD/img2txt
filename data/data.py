@@ -10,7 +10,7 @@ import pandas as pd
 from PIL import Image
 from tqdm import tqdm
 
-from config import FEATURE_ROUTING, _safe_number
+from config.config import FEATURE_ROUTING, _safe_number
 
 
 @dataclass

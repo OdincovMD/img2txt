@@ -10,9 +10,9 @@ import numpy as np
 import pandas as pd
 import torch
 
-from importance_config import LABEL_NAMES, NUM_LABELS
-from importance_model import ImportanceModel
-from threshold_rules import row_to_labels
+from config.importance_config import LABEL_NAMES, NUM_LABELS
+from importance.importance_model import ImportanceModel
+from analysis.threshold_rules import row_to_labels
 
 try:
     from torchvision import transforms

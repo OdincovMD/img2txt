@@ -7,7 +7,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-from importance_config import NUM_LABELS
+from config.importance_config import NUM_LABELS
 
 try:
     import torchvision.models as tv_models
