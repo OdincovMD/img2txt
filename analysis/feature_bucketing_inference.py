@@ -7,7 +7,6 @@ Output: {features_json, labels} - organized bucketed data
 
 from typing import Dict, Any, Optional
 import json
-from analysis.threshold_rules import row_to_labels
 
 
 def bucket_features(
@@ -26,11 +25,13 @@ def bucket_features(
             'raw_features': original features_dict,
         }
     """
+    from analysis.threshold_rules import features_to_labels
+
     # Organize features into structure (for reference)
     features_json = _organize_features_structure(features_dict)
 
     # Apply threshold rules to get labels
-    labels = row_to_labels(features_dict)
+    labels = features_to_labels(features_dict)
 
     return {
         'features_json': features_json,
