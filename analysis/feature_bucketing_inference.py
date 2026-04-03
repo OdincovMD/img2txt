@@ -44,7 +44,7 @@ def _organize_features_structure(features_dict: Dict[str, Any]) -> Dict[str, Dic
     Organize flat feature dict into hierarchical structure by category.
     Uses FEATURE_ROUTING to determine category for each feature.
     """
-    from config import FEATURE_ROUTING
+    from config.config import FEATURE_ROUTING
 
     structure = {
         'color': {'local': {}, 'global': {}},

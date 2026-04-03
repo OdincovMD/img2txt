@@ -1,7 +1,8 @@
 """
 Inference API: Feature extraction for a single image.
+Pipeline: feature extraction → feature bucketing → importance ranking (optional)
 Input: image_path (+ optional segmentation models and importance model)
-Output: {features, features_dict, important_features, image_size, mask_shape}
+Output: {features, features_dict, labels, important_features, image_size, mask_shape}
 """
 
 from pathlib import Path
@@ -18,6 +19,7 @@ from core.features import (
     extract_texture_features,
 )
 from core.segmentation import main as segment_lesion
+from analysis.feature_bucketing_inference import bucket_features
 from importance.importance_inference import load_model, predict_top10
 import torch
 
@@ -60,7 +62,12 @@ def extract_features_and_rank(
     device: Optional[torch.device] = None,
 ) -> Dict[str, Any]:
     """
-    Extract features from a single image and optionally rank by importance.
+    Extract features from a single image, bucket them, and optionally rank by importance.
+
+    Pipeline:
+    1. Extract features (numeric values)
+    2. Bucket features (convert to categorical labels)
+    3. Rank top-10 important features (if importance model provided)
 
     Args:
         image_path: Path to the lesion image
@@ -73,7 +80,10 @@ def extract_features_and_rank(
         {
             'features': dict of all extracted features (feature_name -> (value, description)),
             'features_dict': dict of just numeric values (feature_name -> value),
+            'labels': dict of bucketed categorical labels (feature_name -> label),
             'important_features': list of top-10 feature labels if model provided,
+            'image_size': (height, width),
+            'mask_shape': mask dimensions,
         }
     """
     # Load image
@@ -90,9 +100,14 @@ def extract_features_and_rank(
     features_dict = {k: v[0] if isinstance(v, tuple) else v
                     for k, v in features_with_desc.items()}
 
+    # Bucket features to get categorical labels
+    bucketed = bucket_features(features_dict)
+    labels = bucketed['labels']
+
     result = {
         'features': features_with_desc,
         'features_dict': features_dict,
+        'labels': labels,
         'image_size': (h, w),
         'mask_shape': mask.shape,
     }
@@ -126,12 +141,12 @@ def extract_features_and_rank(
             else:
                 image_input = image
 
-            # Get top-10 features
+            # Get top-10 features from bucketed labels
             try:
                 top_10_labels = predict_top10(
                     model=model,
                     image=image_input,
-                    labels_dict=features_dict,
+                    labels_dict=labels,
                     device=device,
                     image_size=224,
                     k=10,
