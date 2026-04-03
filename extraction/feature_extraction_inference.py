@@ -158,3 +158,75 @@ def extract_features_and_rank(
                 result['important_features'] = []
 
     return result
+
+
+def full_pipeline_inference(
+    image_path: Union[str, Path],
+    yolo_weights: Optional[str] = None,
+    unet_weights: Optional[str] = None,
+    importance_model_path: Optional[Union[str, Path]] = None,
+    classification: Optional[Any] = None,
+    device: Optional[torch.device] = None,
+) -> Dict[str, Any]:
+    """
+    Run complete 4-step pipeline on a single image:
+    1. Extract features (60+ numeric features)
+    2. Bucket features (convert to categorical labels)
+    3. Rank important features (top-10 by importance)
+    4. Generate clinical description (Mistral-7B local LLM)
+
+    Args:
+        image_path: Path to the lesion image
+        yolo_weights: Path to YOLO model weights (optional)
+        unet_weights: Path to UNet fallback model weights (optional)
+        importance_model_path: Path to importance ranking model checkpoint (optional)
+        classification: Optional ClassificationResult for context (from generation.classification_types)
+        device: torch device for inference (defaults to cuda/cpu)
+
+    Returns:
+        {
+            'features': dict of all extracted features,
+            'features_dict': numeric feature values,
+            'labels': categorical labels (bucketed features),
+            'important_features': top-10 feature labels,
+            'description': clinical text description (Russian),
+            'model_used': "mistralai/Mistral-7B-Instruct-v0.1" or similar,
+        }
+    """
+    from analysis.feature_bucketing_inference import bucket_features
+    from importance.importance_ranking_inference import rank_features
+    from generation.description_inference import generate_description
+
+    if device is None:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    # Step 1: Extract features
+    extraction = extract_features_and_rank(
+        image_path=image_path,
+        yolo_weights=yolo_weights,
+        unet_weights=unet_weights,
+        importance_model_path=importance_model_path,
+        device=device,
+    )
+
+    features_dict = extraction['features_dict']
+    labels = extraction['labels']
+    important_features = extraction.get('important_features', [])
+
+    # Step 4: Generate clinical description
+    result_description = generate_description(
+        important_features=important_features,
+        classification=classification,
+        device=device,
+    )
+
+    return {
+        'features': extraction['features'],
+        'features_dict': features_dict,
+        'labels': labels,
+        'important_features': important_features,
+        'description': result_description['description'],
+        'model_used': result_description['model'],
+        'image_size': extraction['image_size'],
+        'mask_shape': extraction['mask_shape'],
+    }

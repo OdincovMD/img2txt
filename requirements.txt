@@ -12,3 +12,4 @@ torchvision
 tqdm
 ipywidgets
 matplotlib
+transformers
