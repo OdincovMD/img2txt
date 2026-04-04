@@ -1,5 +1,7 @@
 """
-Инференс модели отбора важных признаков: загрузка чекпоинта, предсказание топ-10 меток в формате "признак:значение".
+Step 3: Feature importance ranking.
+Loads trained model, predicts top-k important features per image.
+Public API: rank_features_batch(df, ...) → df with 'important_labels' column.
 """
 
 import json
@@ -9,6 +11,7 @@ from typing import List, Optional, Union
 import numpy as np
 import pandas as pd
 import torch
+from tqdm import tqdm
 
 from config.importance_config import LABEL_NAMES, NUM_LABELS
 from importance.importance_model import ImportanceModel
@@ -23,13 +26,11 @@ except ImportError:
 def load_model(
     checkpoint_path: Union[str, Path],
     device: Optional[torch.device] = None,
-    backbone: str = "efficientnet_b0",
-    in_channels: int = 3,
 ) -> ImportanceModel:
-    """Загружает модель из чекпоинта train_importance."""
+    """Load importance model from checkpoint."""
     ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     args = ckpt.get("args", {})
-    backbone = args.get("backbone", backbone)
+    backbone = args.get("backbone", "efficientnet_b0")
     in_channels = 4 if args.get("use_mask") else 3
     model = ImportanceModel(
         backbone_name=backbone,
@@ -44,7 +45,7 @@ def load_model(
     return model
 
 
-def get_inference_transform(image_size: int = 224, in_channels: int = 3):
+def _get_inference_transform(image_size: int = 224, in_channels: int = 3):
     if transforms is None:
         raise ImportError("torchvision required for inference transform.")
     if in_channels == 3:
@@ -71,15 +72,12 @@ def get_inference_transform(image_size: int = 224, in_channels: int = 3):
     return transform_4ch
 
 
-def top10_indices_to_labels(
+def _top10_indices_to_labels(
     top10_indices: List[int],
     labels_dict: dict,
     k: int = 10,
 ) -> List[str]:
-    """
-    Переводит индексы топ-10 в строки "признак:значение".
-    labels_dict: словарь из row_to_labels (или features_to_labels) — ключ = имя признака, значение = строка (или dict/list пропускаем).
-    """
+    """Convert model output indices to 'feature:value' strings."""
     result = []
     for i in top10_indices:
         if i >= len(LABEL_NAMES):
@@ -99,7 +97,7 @@ def top10_indices_to_labels(
     return result[:k]
 
 
-def predict_top10(
+def _predict_top10(
     model: ImportanceModel,
     image: np.ndarray,
     labels_dict: dict,
@@ -109,12 +107,7 @@ def predict_top10(
     k: int = 10,
     mask: Optional[np.ndarray] = None,
 ) -> List[str]:
-    """
-    Один сэмпл: изображение (H,W,3) или (H,W,4) с маской.
-    labels_dict — полный набор меток для этого изображения (из row_to_labels).
-    Возвращает список из k строк "признак:значение".
-    """
-    # Model may expect 4 channels (RGB+mask); if no mask, use zeros
+    """Single-sample prediction: image (H,W,3) + labels → top-k 'feature:value' strings."""
     if hasattr(model, "head") and next(model.backbone.parameters()).shape[1] == 4 and image.shape[-1] == 3:
         if mask is None:
             mask = np.zeros((image.shape[0], image.shape[1], 1), dtype=np.uint8)
@@ -125,81 +118,104 @@ def predict_top10(
         mask = np.expand_dims(mask, axis=-1)
         image = np.concatenate([image, mask], axis=-1)
     if transform is None:
-        transform = get_inference_transform(image_size, in_channels=image.shape[-1])
+        transform = _get_inference_transform(image_size, in_channels=image.shape[-1])
     x = transform(image)
     x = x.unsqueeze(0).to(device)
     with torch.no_grad():
         logits = model(x)
     probs = torch.sigmoid(logits[0]).cpu().numpy()
     top10_idx = np.argsort(probs)[::-1][:k].tolist()
-    return top10_indices_to_labels(top10_idx, labels_dict, k=k)
+    return _top10_indices_to_labels(top10_idx, labels_dict, k=k)
 
 
-def predict_top10_from_row(
+def _predict_from_row(
     model: ImportanceModel,
     row: pd.Series,
-    image_dir: Union[str, Path],
     device: torch.device,
-    image_col: str = "filename",
-    image_id_col: str = "image_id",
     mask_dir: Optional[Union[str, Path]] = None,
     mask_suffix: str = "_mask.png",
     transform=None,
     image_size: int = 224,
     k: int = 10,
 ) -> List[str]:
-    """
-    Предсказание по строке датасета (с колонками features_json, filename и т.д.).
-    Загружает изображение по image_dir/row[image_col], при необходимости маску.
-    Метки для формата "признак:значение" берутся из row_to_labels(row).
-    """
+    """Predict from a DataFrame row. Reads image from row['image_path'], labels from row['features_json']."""
     from PIL import Image
 
-    image_dir = Path(image_dir)
-    fname = row.get(image_col) or row.get("filename")
-    image_id = row.get(image_id_col) or row.get("image_id", "")
-    image_path = image_dir / fname
-    if not image_path.is_file():
-        image_path = image_dir / image_id / fname
-    if not image_path.is_file():
+    image_path = row.get("image_path")
+    if not image_path or not Path(image_path).is_file():
         return []
 
     image = np.array(Image.open(image_path).convert("RGB"))
     labels_dict = row_to_labels(row.to_dict())
+
     mask = None
     if mask_dir:
+        image_id = row.get("image_id", Path(image_path).stem)
         mask_path = Path(mask_dir) / f"{image_id}{mask_suffix}"
         if mask_path.is_file():
             mask = np.array(Image.open(mask_path).convert("L")) > 0
 
-    return predict_top10(model, image, labels_dict, device, transform=transform, image_size=image_size, k=k, mask=mask)
+    return _predict_top10(model, image, labels_dict, device, transform=transform, image_size=image_size, k=k, mask=mask)
 
 
-def add_important_labels_to_dataframe(
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def rank_features_batch(
     df: pd.DataFrame,
-    model: ImportanceModel,
-    device: torch.device,
-    image_dir: Union[str, Path],
-    image_col: str = "filename",
-    image_id_col: str = "image_id",
-    mask_dir: Optional[Union[str, Path]] = None,
+    importance_model_path: Optional[Union[str, Path]] = None,
+    device: Optional[torch.device] = None,
     image_size: int = 224,
     k: int = 10,
+    mask_dir: Optional[Union[str, Path]] = None,
+    verbose: bool = True,
 ) -> pd.DataFrame:
     """
-    Добавляет к df колонку important_labels: список из k строк "признак:значение" для каждой строки.
-    В df должны быть колонки features_json (и при необходимости filename, image_id) для row_to_labels.
+    Step 3: Rank features by importance for all rows in df.
+
+    Args:
+        df: DataFrame with 'image_path' and 'features_json' columns (from steps 1-2).
+        importance_model_path: Path to model checkpoint.
+            If None, 'important_labels' will be empty lists.
+        device: torch device (defaults to cuda if available)
+        image_size: Input image size for model
+        k: Number of top features to return per image
+        mask_dir: Optional directory with mask files
+        verbose: Show progress bar
+
+    Returns:
+        df with added column:
+        - important_labels: list of top-k strings ["feature:value", ...]
     """
-    in_channels = next(model.backbone.parameters()).shape[1]
-    transform = get_inference_transform(image_size, in_channels=in_channels)
-    out = []
-    for idx, row in df.iterrows():
-        pred = predict_top10_from_row(
-            model, row, image_dir, device,
-            image_col=image_col, image_id_col=image_id_col,
-            mask_dir=mask_dir, transform=transform, image_size=image_size, k=k,
-        )
-        out.append(pred)
     df = df.copy()
-    df["important_labels"] = out
+
+    if importance_model_path is None:
+        df['important_labels'] = [[] for _ in range(len(df))]
+        return df
+
+    try:
+        if device is None:
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+        model = load_model(importance_model_path, device=device)
+        in_channels = next(model.backbone.parameters()).shape[1]
+        transform = _get_inference_transform(image_size, in_channels=in_channels)
+
+        results = []
+        iterator = tqdm(df.iterrows(), total=len(df)) if verbose else df.iterrows()
+        for _, row in iterator:
+            pred = _predict_from_row(
+                model, row, device,
+                mask_dir=mask_dir, transform=transform,
+                image_size=image_size, k=k,
+            )
+            results.append(pred)
+
+        df['important_labels'] = results
+
+    except Exception as e:
+        print(f"Warning: Could not rank features: {e}")
+        df['important_labels'] = [[] for _ in range(len(df))]
+
     return df

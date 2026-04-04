@@ -1,4 +1,4 @@
-"""Шаг 1: Числа → метки. Пороговые правила (ABCD, CIEDE2000, GLCM)."""
+"""Числа → метки. Пороговые правила (ABCD, CIEDE2000, GLCM)."""
 
 import json
 import math
@@ -27,11 +27,60 @@ def _get_num(d: dict, key: str) -> Optional[float]:
     return None
 
 
-def compute_palette_variety(dominant_colors_lesion) -> int:
-    """Число устойчивых тонов из dominant_colors_lesion (список HSV-троек)."""
-    if dominant_colors_lesion is None:
-        return 1
-    if not isinstance(dominant_colors_lesion, (list, tuple)):
+def _label(features: dict, key: str, default: str = "неопределено") -> str:
+    """Один признак → одна метка по THRESHOLDS."""
+    if key not in THRESHOLDS:
+        return default
+    return apply_threshold(_get_num(features, key), THRESHOLDS[key], default) or default
+
+
+# ——— Составные правила (несколько признаков → одна метка) ———
+
+def _asymmetry(features: dict) -> str:
+    """Асимметрия по градиентам H/S/V (ABCD rule)."""
+    deltas = [
+        _get_num(features, "delta_H_center_periphery"),
+        _get_num(features, "delta_S_center_periphery"),
+        _get_num(features, "delta_V_center_periphery"),
+        _get_num(features, "delta_V_left_right"),
+        _get_num(features, "delta_S_left_right"),
+        _get_num(features, "delta_V_top_bottom"),
+        _get_num(features, "delta_S_top_bottom"),
+    ]
+    abs_vals = [abs(x) for x in deltas if x is not None]
+    if not abs_vals:
+        return "слабая"
+    return apply_threshold(sum(abs_vals), THRESHOLDS["asymmetry_agg"], "слабая")
+
+
+def _borders(features: dict) -> str:
+    """Границы по circularity + perimeter_area_ratio."""
+    circ = _get_num(features, "circularity")
+    para = _get_num(features, "perimeter_area_ratio")
+    ch, ph = SCALAR["borders_circ_high"], SCALAR["borders_para_high"]
+    cm, pm = SCALAR["borders_circ_mid"], SCALAR["borders_para_mid"]
+    if circ is not None and para is not None:
+        if circ >= ch and para < ph:
+            return "ровные"
+        if circ >= cm and para < pm:
+            return "умеренно неровные"
+    if circ is not None:
+        if circ >= ch:
+            return "ровные"
+        if circ >= cm:
+            return "умеренно неровные"
+    return "фестончатые"
+
+
+def _palette(features: dict) -> str:
+    """Палитра по dominant_colors_lesion → palette_variety."""
+    dom = features.get("dominant_colors_lesion")
+    pv = _compute_palette_variety(dom)
+    return apply_threshold(float(pv), THRESHOLDS["palette_variety"], "монотонная")
+
+
+def _compute_palette_variety(dominant_colors_lesion) -> int:
+    if dominant_colors_lesion is None or not isinstance(dominant_colors_lesion, (list, tuple)):
         return 1
     colors = list(dominant_colors_lesion)
     if not colors:
@@ -52,57 +101,7 @@ def compute_palette_variety(dominant_colors_lesion) -> int:
     return min(n, 6)
 
 
-def number_to_label_asymmetry(features: dict) -> str:
-    """Асимметрия по градиентам H/S/V (ABCD rule)."""
-    deltas = [
-        _get_num(features, "delta_H_center_periphery"),
-        _get_num(features, "delta_S_center_periphery"),
-        _get_num(features, "delta_V_center_periphery"),
-        _get_num(features, "delta_V_left_right"),
-        _get_num(features, "delta_S_left_right"),
-        _get_num(features, "delta_V_top_bottom"),
-        _get_num(features, "delta_S_top_bottom"),
-    ]
-    abs_vals = [abs(x) for x in deltas if x is not None]
-    if not abs_vals:
-        return "слабая"
-    agg = sum(abs_vals)
-    return apply_threshold(agg, THRESHOLDS["asymmetry_agg"], "слабая")
-
-
-def number_to_label_borders(features: dict) -> str:
-    """Границы по circularity, perimeter_area_ratio."""
-    circ = _get_num(features, "circularity")
-    para = _get_num(features, "perimeter_area_ratio")
-    ch, ph = SCALAR["borders_circ_high"], SCALAR["borders_para_high"]
-    cm, pm = SCALAR["borders_circ_mid"], SCALAR["borders_para_mid"]
-    if circ is not None and para is not None:
-        if circ >= ch and para < ph:
-            return "ровные"
-        if circ >= cm and para < pm:
-            return "умеренно неровные"
-    if circ is not None:
-        if circ >= ch:
-            return "ровные"
-        if circ >= cm:
-            return "умеренно неровные"
-    return "фестончатые"
-
-
-def number_to_label_contrast(features: dict) -> str:
-    """Контраст очаг↔кожа по ΔE2000 (CIEDE2000)."""
-    de = _get_num(features, "color_distance_deltaE")
-    return apply_threshold(de, THRESHOLDS["color_distance_deltaE"], "умеренный")
-
-
-def number_to_label_palette(features: dict) -> str:
-    """Палитра по palette_variety."""
-    dom = features.get("dominant_colors_lesion")
-    pv = compute_palette_variety(dom)
-    return apply_threshold(float(pv), THRESHOLDS["palette_variety"], "монотонная")
-
-
-def number_to_label_center_periphery(features: dict) -> dict:
+def _center_periphery(features: dict) -> dict:
     """Центр/периферия: delta_V и delta_S."""
     out = {}
     dv = _get_num(features, "delta_V_center_periphery")
@@ -116,24 +115,14 @@ def number_to_label_center_periphery(features: dict) -> dict:
     return out
 
 
-def number_to_label_texture(features: dict) -> str:
-    """Текстура по glcm_homogeneity."""
-    hom = _get_num(features, "glcm_homogeneity")
-    return apply_threshold(hom, THRESHOLDS["glcm_homogeneity"], "умеренно неоднородная")
-
-
-def number_to_label_pigmentation(features: dict) -> str:
-    """Пигментация: по долям тёмных, красных, синих, белых пикселей."""
+def _pigmentation(features: dict) -> str:
+    """Пигментация по долям тёмных, красных, синих, белых пикселей."""
     dark = _get_num(features, "percent_dark_pixels") or 0
     red = _get_num(features, "percent_red_pixels") or 0
     blue = _get_num(features, "percent_blue_pixels") or 0
     white = _get_num(features, "percent_white_pixels") or 0
-    w, rb, dh, dm = (
-        SCALAR["pigmentation_white"],
-        SCALAR["pigmentation_red_blue"],
-        SCALAR["pigmentation_dark_high"],
-        SCALAR["pigmentation_dark_mid"],
-    )
+    w, rb = SCALAR["pigmentation_white"], SCALAR["pigmentation_red_blue"]
+    dh, dm = SCALAR["pigmentation_dark_high"], SCALAR["pigmentation_dark_mid"]
     if white > w:
         return "с выраженными обесцвеченными участками"
     if red > rb or blue > rb:
@@ -145,8 +134,8 @@ def number_to_label_pigmentation(features: dict) -> str:
     return "слабо пигментированная"
 
 
-def number_to_label_elongation(features: dict) -> str:
-    """Вытянутость формы: aspect_ratio, eccentricity."""
+def _elongation(features: dict) -> str:
+    """Вытянутость: aspect_ratio + eccentricity."""
     ar = _get_num(features, "aspect_ratio")
     ecc = _get_num(features, "eccentricity")
     if ar is None and ecc is None:
@@ -164,19 +153,17 @@ def number_to_label_elongation(features: dict) -> str:
     return "вытянутая"
 
 
-def number_to_label_rim(features: dict) -> str:
-    """Ободок: delta_V_inner_rim (светлый/тёмный ободок по краю)."""
+def _rim(features: dict) -> str:
+    """Ободок: delta_V_inner_rim."""
     dv = _get_num(features, "delta_V_inner_rim")
     th = SCALAR["rim_abs"]
     if dv is None or abs(dv) < th:
         return "без выраженного ободка"
-    if dv > 0:
-        return "светлый ободок по краю"
-    return "тёмный ободок по краю"
+    return "светлый ободок по краю" if dv > 0 else "тёмный ободок по краю"
 
 
-def number_to_label_color_homogeneity(features: dict) -> str:
-    """Однородность цвета: std_H/S/V, entropy."""
+def _color_homogeneity(features: dict) -> str:
+    """Однородность цвета: std_H/S/V + entropy."""
     std_h = _get_num(features, "std_H_lesion") or 0
     std_s = _get_num(features, "std_S_lesion") or 0
     std_v = _get_num(features, "std_V_lesion") or 0
@@ -190,20 +177,8 @@ def number_to_label_color_homogeneity(features: dict) -> str:
     return "цвет неоднородный"
 
 
-def number_to_label_texture_coarseness(features: dict) -> str:
-    """Грубость текстуры: glcm_contrast (высокий = грубая, пятнистая)."""
-    c = _get_num(features, "glcm_contrast")
-    return apply_threshold(c, THRESHOLDS["glcm_contrast"], "средняя")
-
-
-def number_to_label_shape(features: dict) -> str:
-    """Форма по circularity."""
-    circ = _get_num(features, "circularity")
-    return apply_threshold(circ, THRESHOLDS["circularity"], "неопределенная")
-
-
-def number_to_label_dominant_hue(features: dict) -> str:
-    """Преобладающий оттенок по mean_H и color_balance (H в HSV 0–180 в OpenCV)."""
+def _dominant_hue(features: dict) -> str:
+    """Преобладающий оттенок по mean_H + color_balance."""
     mean_h = _get_num(features, "mean_H_lesion")
     if mean_h is None:
         return "неопределенный"
@@ -216,38 +191,26 @@ def number_to_label_dominant_hue(features: dict) -> str:
     return base or "неопределенный"
 
 
-def number_to_label_pigment_inclusions(features: dict) -> list:
-    """Список цветовых включений (красные/синие/белые участки)."""
+def _pigment_inclusions(features: dict) -> list:
+    """Цветовые включения (красные/синие/белые участки)."""
     th = SCALAR["pigment_inclusion_threshold"]
     inclusions = []
-    red = _get_num(features, "percent_red_pixels") or 0
-    if red > th:
+    if (_get_num(features, "percent_red_pixels") or 0) > th:
         inclusions.append("красные вкрапления")
-    blue = _get_num(features, "percent_blue_pixels") or 0
-    if blue > th:
+    if (_get_num(features, "percent_blue_pixels") or 0) > th:
         inclusions.append("синеватые участки")
-    white = _get_num(features, "percent_white_pixels") or 0
-    if white > th:
+    if (_get_num(features, "percent_white_pixels") or 0) > th:
         inclusions.append("обесцвеченные участки")
     return inclusions
 
 
-def number_to_label_structure_order(features: dict) -> str:
-    """Упорядоченность структуры по lbp_uniformity."""
-    uniform = _get_num(features, "lbp_uniformity")
-    return apply_threshold(uniform, THRESHOLDS["lbp_uniformity"], "неопределенная")
-
-
-def number_to_label_lobulation(features: dict) -> str:
-    """Лобуляции: суррогат из radial_variance, convexity, perimeter_area_ratio."""
+def _lobulation(features: dict) -> str:
+    """Лобуляции: radial_variance + convexity + perimeter_area_ratio."""
     rvar = _get_num(features, "radial_variance")
     conv = _get_num(features, "convexity")
     para = _get_num(features, "perimeter_area_ratio")
-    rn, pb, ps = (
-        SCALAR["lobulation_radial_norm"],
-        SCALAR["lobulation_para_base"],
-        SCALAR["lobulation_para_span"],
-    )
+    rn = SCALAR["lobulation_radial_norm"]
+    pb, ps = SCALAR["lobulation_para_base"], SCALAR["lobulation_para_span"]
     score = 0.0
     if rvar is not None:
         score += min(rvar / rn, 1.0) * 0.4
@@ -263,287 +226,71 @@ def number_to_label_lobulation(features: dict) -> str:
     return "лобуляции выраженные"
 
 
-def _label_by_feature(
-    features: dict,
-    feature_key: str,
-    default: str = "неопределено",
-) -> str:
-    """Универсальное преобразование одного признака в метку по конфигу THRESHOLDS."""
-    val = _get_num(features, feature_key)
-    if feature_key not in THRESHOLDS:
-        return default
-    return apply_threshold(val, THRESHOLDS[feature_key], default) or default
-
-
-# ——— Функции для признаков, ранее не охваченных составными правилами ———
-
-def number_to_label_area(features: dict) -> str:
-    """Размер очага по площади маски."""
-    return _label_by_feature(features, "area", "неопределенный")
-
-
-def number_to_label_perimeter(features: dict) -> str:
-    """Периметр контура."""
-    return _label_by_feature(features, "perimeter", "неопределенный")
-
-
-def number_to_label_convexity(features: dict) -> str:
-    """Выпуклость контура."""
-    return _label_by_feature(features, "convexity", "неопределенная")
-
-
-def number_to_label_solidity(features: dict) -> str:
-    """Плотность к выпуклой оболочке."""
-    return _label_by_feature(features, "solidity", "неопределенная")
-
-
-def number_to_label_extent(features: dict) -> str:
-    """Заполнение bbox."""
-    return _label_by_feature(features, "extent", "неопределенное")
-
-
-def number_to_label_radial_variance(features: dict) -> str:
-    """Вариация радиуса границы."""
-    return _label_by_feature(features, "radial_variance", "неопределенная")
-
-
-def number_to_label_fractal_dimension(features: dict) -> str:
-    """Фрактальная размерность границы."""
-    return _label_by_feature(features, "fractal_dimension", "неопределенная")
-
-
-def number_to_label_eccentricity(features: dict) -> str:
-    """Эксцентриситет формы."""
-    return _label_by_feature(features, "eccentricity", "неопределенная")
-
-
-def number_to_label_perimeter_area_ratio(features: dict) -> str:
-    """Отношение периметр/площадь."""
-    return _label_by_feature(features, "perimeter_area_ratio", "неопределенное")
-
-
-def number_to_label_color_balance_R(features: dict) -> str:
-    """Доля красного в среднем цвете."""
-    return _label_by_feature(features, "color_balance_R", "неопределено")
-
-
-def number_to_label_color_balance_G(features: dict) -> str:
-    """Доля зелёного в среднем цвете."""
-    return _label_by_feature(features, "color_balance_G", "неопределено")
-
-
-def number_to_label_color_balance_B(features: dict) -> str:
-    """Доля синего в среднем цвете."""
-    return _label_by_feature(features, "color_balance_B", "неопределено")
-
-
-def number_to_label_color_distance_euclidean(features: dict) -> str:
-    """LAB-контраст очаг–кожа (евклидов)."""
-    return _label_by_feature(features, "color_distance_euclidean", "неопределенный")
-
-
-def number_to_label_delta_H_center_periphery(features: dict) -> str:
-    """Разница оттенка центр–периферия."""
-    return _label_by_feature(features, "delta_H_center_periphery", "неопределено")
-
-
-def number_to_label_delta_S_center_periphery(features: dict) -> str:
-    """Разница насыщенности центр–периферия."""
-    return _label_by_feature(features, "delta_S_center_periphery", "неопределено")
-
-
-def number_to_label_delta_V_center_periphery(features: dict) -> str:
-    """Разница яркости центр–периферия."""
-    return _label_by_feature(features, "delta_V_center_periphery", "неопределено")
-
-
-def number_to_label_delta_V_inner_rim(features: dict) -> str:
-    """Разница яркости центр–ободок."""
-    return _label_by_feature(features, "delta_V_inner_rim", "неопределено")
-
-
-def number_to_label_delta_V_left_right(features: dict) -> str:
-    """Асимметрия яркости лево–право."""
-    return _label_by_feature(features, "delta_V_left_right", "неопределено")
-
-
-def number_to_label_delta_V_top_bottom(features: dict) -> str:
-    """Асимметрия яркости верх–низ."""
-    return _label_by_feature(features, "delta_V_top_bottom", "неопределено")
-
-
-def number_to_label_delta_S_left_right(features: dict) -> str:
-    """Асимметрия насыщенности лево–право."""
-    return _label_by_feature(features, "delta_S_left_right", "неопределено")
-
-
-def number_to_label_delta_S_top_bottom(features: dict) -> str:
-    """Асимметрия насыщенности верх–низ."""
-    return _label_by_feature(features, "delta_S_top_bottom", "неопределено")
-
-
-def number_to_label_entropy_H_lesion(features: dict) -> str:
-    """Разнообразие оттенка в очаге."""
-    return _label_by_feature(features, "entropy_H_lesion", "неопределенное")
-
-
-def number_to_label_entropy_S_lesion(features: dict) -> str:
-    """Разнообразие насыщенности в очаге."""
-    return _label_by_feature(features, "entropy_S_lesion", "неопределенное")
-
-
-def number_to_label_entropy_V_lesion(features: dict) -> str:
-    """Разнообразие яркости в очаге."""
-    return _label_by_feature(features, "entropy_V_lesion", "неопределенное")
-
-
-def number_to_label_std_H_lesion(features: dict) -> str:
-    """Вариабельность оттенка в очаге."""
-    return _label_by_feature(features, "std_H_lesion", "неопределенная")
-
-
-def number_to_label_std_S_lesion(features: dict) -> str:
-    """Вариабельность насыщенности в очаге."""
-    return _label_by_feature(features, "std_S_lesion", "неопределенная")
-
-
-def number_to_label_std_V_lesion(features: dict) -> str:
-    """Вариабельность яркости в очаге."""
-    return _label_by_feature(features, "std_V_lesion", "неопределенная")
-
-
-def number_to_label_mean_S_lesion(features: dict) -> str:
-    """Средняя насыщенность очага."""
-    return _label_by_feature(features, "mean_S_lesion", "неопределенная")
-
-
-def number_to_label_mean_V_lesion(features: dict) -> str:
-    """Средняя яркость очага."""
-    return _label_by_feature(features, "mean_V_lesion", "неопределенная")
-
-
-def number_to_label_glcm_energy(features: dict) -> str:
-    """GLCM-энергия текстуры."""
-    return _label_by_feature(features, "glcm_energy", "неопределенная")
-
-
-def number_to_label_glcm_entropy(features: dict) -> str:
-    """GLCM-энтропия текстуры."""
-    return _label_by_feature(features, "glcm_entropy", "неопределенная")
-
-
-def number_to_label_lbp_entropy(features: dict) -> str:
-    """LBP-энтропия."""
-    return _label_by_feature(features, "lbp_entropy", "неопределенная")
-
-
-def number_to_label_lbp_mean(features: dict) -> str:
-    """LBP-среднее."""
-    return _label_by_feature(features, "lbp_mean", "неопределенное")
-
-
-def number_to_label_lbp_std(features: dict) -> str:
-    """LBP-разброс."""
-    return _label_by_feature(features, "lbp_std", "неопределенный")
-
-
-def number_to_label_lbp_median(features: dict) -> str:
-    """LBP-медиана."""
-    return _label_by_feature(features, "lbp_median", "неопределенная")
-
-
-def number_to_label_percent_dark_pixels(features: dict) -> str:
-    """Доля тёмных пикселей."""
-    return _label_by_feature(features, "percent_dark_pixels", "неопределено")
-
-
-def number_to_label_percent_white_pixels(features: dict) -> str:
-    """Доля белых пикселей."""
-    return _label_by_feature(features, "percent_white_pixels", "неопределено")
-
-
-def number_to_label_percent_red_pixels(features: dict) -> str:
-    """Доля красных пикселей."""
-    return _label_by_feature(features, "percent_red_pixels", "неопределено")
-
-
-def number_to_label_percent_blue_pixels(features: dict) -> str:
-    """Доля синих пикселей."""
-    return _label_by_feature(features, "percent_blue_pixels", "неопределено")
-
-
-def number_to_label_percent_outlier_bright_pixels(features: dict) -> str:
-    """Доля аномально ярких пикселей."""
-    return _label_by_feature(features, "percent_outlier_bright_pixels", "неопределено")
-
-
-def number_to_label_percent_outlier_dark_pixels(features: dict) -> str:
-    """Доля аномально тёмных пикселей."""
-    return _label_by_feature(features, "percent_outlier_dark_pixels", "неопределено")
-
+# ——— Агрегатор ———
 
 def features_to_labels(features: dict) -> dict:
     """Преобразует словарь признаков в словарь категориальных меток."""
     labels = {
-        "asymmetry": number_to_label_asymmetry(features),
-        "borders": number_to_label_borders(features),
-        "contrast": number_to_label_contrast(features),
-        "palette": number_to_label_palette(features),
-        "texture": number_to_label_texture(features),
-        "lobulation": number_to_label_lobulation(features),
-        "pigmentation": number_to_label_pigmentation(features),
-        "elongation": number_to_label_elongation(features),
-        "rim": number_to_label_rim(features),
-        "color_homogeneity": number_to_label_color_homogeneity(features),
-        "texture_coarseness": number_to_label_texture_coarseness(features),
-        "shape": number_to_label_shape(features),
-        "dominant_hue": number_to_label_dominant_hue(features),
-        "pigment_inclusions": number_to_label_pigment_inclusions(features),
-        "structure_order": number_to_label_structure_order(features),
-        # Метки по одному признаку из конфига
-        "area": number_to_label_area(features),
-        "perimeter": number_to_label_perimeter(features),
-        "convexity": number_to_label_convexity(features),
-        "solidity": number_to_label_solidity(features),
-        "extent": number_to_label_extent(features),
-        "radial_variance": number_to_label_radial_variance(features),
-        "fractal_dimension": number_to_label_fractal_dimension(features),
-        "eccentricity": number_to_label_eccentricity(features),
-        "perimeter_area_ratio": number_to_label_perimeter_area_ratio(features),
-        "color_balance_R": number_to_label_color_balance_R(features),
-        "color_balance_G": number_to_label_color_balance_G(features),
-        "color_balance_B": number_to_label_color_balance_B(features),
-        "color_distance_euclidean": number_to_label_color_distance_euclidean(features),
-        "delta_H_center_periphery": number_to_label_delta_H_center_periphery(features),
-        "delta_S_center_periphery": number_to_label_delta_S_center_periphery(features),
-        "delta_V_center_periphery": number_to_label_delta_V_center_periphery(features),
-        "delta_V_inner_rim": number_to_label_delta_V_inner_rim(features),
-        "delta_V_left_right": number_to_label_delta_V_left_right(features),
-        "delta_V_top_bottom": number_to_label_delta_V_top_bottom(features),
-        "delta_S_left_right": number_to_label_delta_S_left_right(features),
-        "delta_S_top_bottom": number_to_label_delta_S_top_bottom(features),
-        "entropy_H_lesion": number_to_label_entropy_H_lesion(features),
-        "entropy_S_lesion": number_to_label_entropy_S_lesion(features),
-        "entropy_V_lesion": number_to_label_entropy_V_lesion(features),
-        "std_H_lesion": number_to_label_std_H_lesion(features),
-        "std_S_lesion": number_to_label_std_S_lesion(features),
-        "std_V_lesion": number_to_label_std_V_lesion(features),
-        "mean_S_lesion": number_to_label_mean_S_lesion(features),
-        "mean_V_lesion": number_to_label_mean_V_lesion(features),
-        "glcm_energy": number_to_label_glcm_energy(features),
-        "glcm_entropy": number_to_label_glcm_entropy(features),
-        "lbp_entropy": number_to_label_lbp_entropy(features),
-        "lbp_mean": number_to_label_lbp_mean(features),
-        "lbp_std": number_to_label_lbp_std(features),
-        "lbp_median": number_to_label_lbp_median(features),
-        "percent_dark_pixels": number_to_label_percent_dark_pixels(features),
-        "percent_white_pixels": number_to_label_percent_white_pixels(features),
-        "percent_red_pixels": number_to_label_percent_red_pixels(features),
-        "percent_blue_pixels": number_to_label_percent_blue_pixels(features),
-        "percent_outlier_bright_pixels": number_to_label_percent_outlier_bright_pixels(features),
-        "percent_outlier_dark_pixels": number_to_label_percent_outlier_dark_pixels(features),
+        # Составные правила
+        "asymmetry": _asymmetry(features),
+        "borders": _borders(features),
+        "contrast": _label(features, "color_distance_deltaE", "умеренный"),
+        "palette": _palette(features),
+        "texture": _label(features, "glcm_homogeneity", "умеренно неоднородная"),
+        "lobulation": _lobulation(features),
+        "pigmentation": _pigmentation(features),
+        "elongation": _elongation(features),
+        "rim": _rim(features),
+        "color_homogeneity": _color_homogeneity(features),
+        "texture_coarseness": _label(features, "glcm_contrast", "средняя"),
+        "shape": _label(features, "circularity", "неопределенная"),
+        "dominant_hue": _dominant_hue(features),
+        "pigment_inclusions": _pigment_inclusions(features),
+        "structure_order": _label(features, "lbp_uniformity", "неопределенная"),
+        "center_periphery": _center_periphery(features),
+        # Простые признаки — прямой вызов _label
+        "area": _label(features, "area", "неопределенный"),
+        "perimeter": _label(features, "perimeter", "неопределенный"),
+        "convexity": _label(features, "convexity", "неопределенная"),
+        "solidity": _label(features, "solidity", "неопределенная"),
+        "extent": _label(features, "extent", "неопределенное"),
+        "radial_variance": _label(features, "radial_variance", "неопределенная"),
+        "fractal_dimension": _label(features, "fractal_dimension", "неопределенная"),
+        "eccentricity": _label(features, "eccentricity", "неопределенная"),
+        "perimeter_area_ratio": _label(features, "perimeter_area_ratio", "неопределенное"),
+        "color_balance_R": _label(features, "color_balance_R", "неопределено"),
+        "color_balance_G": _label(features, "color_balance_G", "неопределено"),
+        "color_balance_B": _label(features, "color_balance_B", "неопределено"),
+        "color_distance_euclidean": _label(features, "color_distance_euclidean", "неопределенный"),
+        "delta_H_center_periphery": _label(features, "delta_H_center_periphery", "неопределено"),
+        "delta_S_center_periphery": _label(features, "delta_S_center_periphery", "неопределено"),
+        "delta_V_center_periphery": _label(features, "delta_V_center_periphery", "неопределено"),
+        "delta_V_inner_rim": _label(features, "delta_V_inner_rim", "неопределено"),
+        "delta_V_left_right": _label(features, "delta_V_left_right", "неопределено"),
+        "delta_V_top_bottom": _label(features, "delta_V_top_bottom", "неопределено"),
+        "delta_S_left_right": _label(features, "delta_S_left_right", "неопределено"),
+        "delta_S_top_bottom": _label(features, "delta_S_top_bottom", "неопределено"),
+        "entropy_H_lesion": _label(features, "entropy_H_lesion", "неопределенное"),
+        "entropy_S_lesion": _label(features, "entropy_S_lesion", "неопределенное"),
+        "entropy_V_lesion": _label(features, "entropy_V_lesion", "неопределенное"),
+        "std_H_lesion": _label(features, "std_H_lesion", "неопределенная"),
+        "std_S_lesion": _label(features, "std_S_lesion", "неопределенная"),
+        "std_V_lesion": _label(features, "std_V_lesion", "неопределенная"),
+        "mean_S_lesion": _label(features, "mean_S_lesion", "неопределенная"),
+        "mean_V_lesion": _label(features, "mean_V_lesion", "неопределенная"),
+        "glcm_energy": _label(features, "glcm_energy", "неопределенная"),
+        "glcm_entropy": _label(features, "glcm_entropy", "неопределенная"),
+        "lbp_entropy": _label(features, "lbp_entropy", "неопределенная"),
+        "lbp_mean": _label(features, "lbp_mean", "неопределенное"),
+        "lbp_std": _label(features, "lbp_std", "неопределенный"),
+        "lbp_median": _label(features, "lbp_median", "неопределенная"),
+        "percent_dark_pixels": _label(features, "percent_dark_pixels", "неопределено"),
+        "percent_white_pixels": _label(features, "percent_white_pixels", "неопределено"),
+        "percent_red_pixels": _label(features, "percent_red_pixels", "неопределено"),
+        "percent_blue_pixels": _label(features, "percent_blue_pixels", "неопределено"),
+        "percent_outlier_bright_pixels": _label(features, "percent_outlier_bright_pixels", "неопределено"),
+        "percent_outlier_dark_pixels": _label(features, "percent_outlier_dark_pixels", "неопределено"),
     }
-    labels["center_periphery"] = number_to_label_center_periphery(features)
     return labels
 
 
@@ -578,4 +325,3 @@ def row_to_labels(row) -> dict:
         return features_to_labels({})
     feats = parse_features_json(raw)
     return features_to_labels(feats)
-

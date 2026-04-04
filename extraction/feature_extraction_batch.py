@@ -1,11 +1,12 @@
 """
-Batch API: Feature extraction for multiple images.
-Input: image_dir + metadata_csv
-Output: DataFrame with all features
+Batch API: Feature extraction for one or multiple images.
+Input: DataFrame with 'image_path' column
+Output: DataFrame with added feature columns
 """
 
 from pathlib import Path
-from typing import Dict, Optional, Union, List, Any
+from typing import Dict, Optional, Union, Any
+import json
 import numpy as np
 import pandas as pd
 import cv2
@@ -20,159 +21,136 @@ from core.features import (
 )
 from core.segmentation import main as segment_lesion
 from config.config import FEATURE_ROUTING, _safe_number
-from data.data import MetaRow, build_row
 
 
-def load_image_bgr(image_path: Union[str, Path]) -> np.ndarray:
-    """Load image in BGR format (OpenCV convention)."""
+def images_to_df(
+    image_dir: Union[str, Path],
+    recursive: bool = False,
+) -> pd.DataFrame:
+    """
+    Scan a directory and return a DataFrame with 'image_path', 'image_id', 'filename' columns.
+    Convenience function to build input for extract_features_batch.
+    """
+    image_dir = Path(image_dir)
+    exts = {".jpg", ".jpeg", ".png", ".bmp"}
+    if recursive:
+        paths = [p for p in image_dir.rglob("*") if p.suffix.lower() in exts and p.is_file()]
+    else:
+        paths = [p for p in image_dir.iterdir() if p.suffix.lower() in exts and p.is_file()]
+
+    return pd.DataFrame([
+        {'image_path': str(p), 'image_id': p.stem, 'filename': p.name}
+        for p in sorted(paths)
+    ])
+
+
+def _load_image_bgr(image_path: Union[str, Path]) -> np.ndarray:
     image = cv2.imread(str(image_path))
     if image is None:
         raise FileNotFoundError(f"Cannot load image: {image_path}")
     return image
 
 
-def extract_features_from_mask(
-    image: np.ndarray,
-    mask: np.ndarray,
-) -> Dict[str, Any]:
-    """
-    Extract all features (color, shape, border, texture) from image + mask.
-    Returns dict with feature_name -> (value, description) tuples.
-    """
+def _extract_features_from_mask(image: np.ndarray, mask: np.ndarray) -> Dict[str, Any]:
     features = {}
-
-    # Color features
     features.update(extract_global_color_features_with_mask(image, mask))
     features.update(extract_local_color_features_with_mask(image, mask))
-
-    # Shape, border, texture
     features.update(extract_shape_features(mask))
     features.update(extract_border_features(mask))
     features.update(extract_texture_features(image, mask))
-
     return features
 
 
-def extract_single_image_features(
-    image_path: Union[str, Path],
-    meta: MetaRow,
-    yolo_weights: Optional[str] = None,
-    unet_weights: Optional[str] = None,
+def _build_features_json(features_dict: Dict[str, Any]) -> str:
+    features_tree: Dict[str, Any] = {
+        "color": {"local": {}, "global": {}},
+        "shape": {},
+        "border": {},
+        "texture": {},
+    }
+    for key, v in features_dict.items():
+        if key not in FEATURE_ROUTING:
+            continue
+        value = _safe_number(v)
+        block, nicename, unit = FEATURE_ROUTING[key]
+        if block == "color.local":
+            features_tree["color"]["local"][key] = [nicename, value, unit]
+        elif block == "color.global":
+            features_tree["color"]["global"][key] = [nicename, value, unit]
+        elif block == "shape":
+            features_tree["shape"][key] = [nicename, value, unit]
+        elif block == "border":
+            features_tree["border"][key] = [nicename, value, unit]
+        else:
+            features_tree["texture"][key] = [nicename, value, unit]
+    return json.dumps(features_tree, ensure_ascii=False)
+
+
+def _process_row(
+    row_dict: Dict[str, Any],
+    yolo_weights: Optional[str],
+    unet_weights: Optional[str],
 ) -> Dict[str, Any]:
-    """
-    Extract features from a single image.
-    Returns a dataset row dict with metadata + features_json.
-    """
-    image_path = Path(image_path)
-
+    image_path = Path(row_dict['image_path'])
     try:
-        # Load image
-        image = load_image_bgr(image_path)
-
-        # Segment lesion
+        image = _load_image_bgr(image_path)
         mask = segment_lesion(str(image_path), yolo_weights, unet_weights)
+        features_dict = _extract_features_from_mask(image, mask)
 
-        # Extract features
-        features_dict = extract_features_from_mask(image, mask)
-
-        # Build dataset row
-        row = build_row(meta, features_dict)
-        row['status'] = 'success'
-        return row
+        result = {
+            'features_json': _build_features_json(features_dict),
+            'status': 'success',
+        }
+        for key in FEATURE_ROUTING:
+            result[key] = _safe_number(features_dict.get(key))
+        return result
 
     except Exception as e:
-        return {
-            'image_id': meta.image_id,
-            'filename': meta.filename,
-            'class_dir': meta.class_dir,
-            'status': 'error',
-            'error': str(e),
-        }
+        return {'status': 'error', 'error': str(e)}
 
 
 def extract_features_batch(
-    image_dir: Union[str, Path],
-    metadata_csv: Union[str, Path],
+    df: pd.DataFrame,
     yolo_weights: Optional[str] = None,
     unet_weights: Optional[str] = None,
     verbose: bool = True,
 ) -> pd.DataFrame:
     """
-    Extract features from all images in a directory.
+    Extract features for all rows in df.
 
     Args:
-        image_dir: Directory containing images
-        metadata_csv: CSV with columns: image_id, filename, class_dir, [diagnosis, feature_type, structure, properties]
+        df: DataFrame with 'image_path' column (absolute paths).
+            May optionally contain 'image_id', 'filename', and other metadata columns —
+            they are preserved unchanged.
         yolo_weights: Path to YOLO model weights (optional)
         unet_weights: Path to UNet fallback model weights (optional)
         verbose: Show progress bar
 
     Returns:
-        DataFrame with columns:
-        - image_id, filename, class_dir, diagnosis, feature_type, structure, properties (from CSV)
-        - features_json: structured dict of all extracted features
-        - <individual features>: flattened feature columns
+        Original df with added columns:
+        - features_json: structured JSON of all features
+        - <individual features>: flattened feature values
         - status: 'success' or 'error'
         - error: error message if status == 'error'
+
+    Example (single image):
+        df = pd.DataFrame([{'image_path': '/data/lesion.jpg'}])
+        df = extract_features_batch(df)
+
+    Example (directory):
+        df = images_to_df('/data/images/')
+        df = extract_features_batch(df)
     """
-    image_dir = Path(image_dir)
-    metadata_csv = Path(metadata_csv)
+    df = df.copy()
 
-    # Load metadata
-    df_meta = pd.read_csv(metadata_csv)
+    iterator = df.itertuples(index=False)
+    if verbose:
+        iterator = tqdm(list(iterator), total=len(df))
 
-    rows = []
+    results = [_process_row(row._asdict(), yolo_weights, unet_weights) for row in iterator]
+    results_df = pd.DataFrame(results, index=df.index)
 
-    # Process each image
-    iterator = tqdm(df_meta.itertuples(index=False), total=len(df_meta)) if verbose else df_meta.itertuples(index=False)
-
-    for row_tuple in iterator:
-        row_dict = row_tuple._asdict()
-
-        # Build MetaRow
-        meta = MetaRow(
-            image_id=row_dict.get('image_id'),
-            filename=row_dict.get('filename'),
-            class_dir=row_dict.get('class_dir'),
-            diagnosis=row_dict.get('diagnosis'),
-            feature_type=row_dict.get('feature_type'),
-            structure=row_dict.get('structure'),
-            properties=row_dict.get('properties'),
-        )
-
-        # Build full image path
-        image_path = image_dir / meta.filename
-
-        # Extract features
-        result_row = extract_single_image_features(
-            image_path,
-            meta,
-            yolo_weights=yolo_weights,
-            unet_weights=unet_weights,
-        )
-
-        rows.append(result_row)
-
-    # Convert to DataFrame
-    df = pd.DataFrame(rows)
-
-    # Add individual feature columns (flatten features_json)
-    if 'features_json' in df.columns:
-        def extract_feature_value(features_json, feature_key):
-            if features_json is None:
-                return None
-            if isinstance(features_json, dict):
-                for cat_name, cat_dict in features_json.items():
-                    if isinstance(cat_dict, dict):
-                        if feature_key in cat_dict:
-                            val = cat_dict[feature_key]
-                            return _safe_number(val)
-            return None
-
-        # Add columns for all known features
-        for feature_key in FEATURE_ROUTING.keys():
-            df[feature_key] = df['features_json'].apply(
-                lambda x: extract_feature_value(x, feature_key)
-            )
+    for col in results_df.columns:
+        df[col] = results_df[col]
 
     return df
