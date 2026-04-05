@@ -13,3 +13,4 @@ tqdm
 ipywidgets
 matplotlib
 transformers
+flask

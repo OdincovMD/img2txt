@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Разметка важных признаков</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <header>
+        <h1>Разметка важных признаков</h1>
+        <div class="header-info">
+            <span id="progress">Загрузка...</span>
+            <span id="selection-count" class="badge">Выбрано: 0 / 10</span>
+        </div>
+    </header>
+
+    <main>
+        <div class="image-panel">
+            <img id="image" src="" alt="Изображение">
+            <div id="image-name" class="image-name"></div>
+        </div>
+
+        <div class="labels-panel">
+            <div id="categories"></div>
+        </div>
+    </main>
+
+    <footer>
+        <button id="btn-back" class="btn btn-secondary" title="←">← Назад</button>
+        <button id="btn-skip" class="btn btn-secondary" title="→">Пропустить →</button>
+        <button id="btn-save" class="btn btn-primary" title="Ctrl+S / Enter">Сохранить и далее ✓</button>
+    </footer>
+
+    <div id="toast" class="toast hidden"></div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

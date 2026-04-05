@@ -10,7 +10,7 @@ import json
 import pandas as pd
 from tqdm import tqdm
 
-from analysis.threshold_rules import row_to_labels
+from analysis.threshold_rules import features_to_labels
 from config.config import FEATURE_ROUTING
 
 
@@ -46,7 +46,7 @@ def bucket_features_batch(
         features_dict = _extract_numeric_features(row_dict)
 
         # Apply threshold rules
-        labels = row_to_labels(features_dict)
+        labels = features_to_labels(features_dict)
 
         # Organize features into hierarchical structure
         features_organized = _organize_features_structure(features_dict)
@@ -59,8 +59,9 @@ def bucket_features_batch(
         })
 
     # Convert results to DataFrame and add to original
-    results_df = pd.DataFrame(results_list)
-    df = pd.concat([df, results_df], axis=1)
+    results_df = pd.DataFrame(results_list, index=df.index)
+    for col in results_df.columns:
+        df[col] = results_df[col]
 
     return df
 
