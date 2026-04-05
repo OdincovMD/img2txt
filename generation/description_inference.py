@@ -37,10 +37,19 @@ def _parse_feature_entries(important_features: List[str]) -> List[Tuple[str, str
     return results
 
 
-def _build_prompt(
+_SYSTEM_PROMPT = (
+    "Ты — медицинский ассистент-дерматолог. "
+    "Составляй клинические описания дерматоскопических образований на русском языке. "
+    "Описание должно быть профессиональным, лаконичным, 3–5 предложений. "
+    "Используй только предоставленные данные. Не ставь диагноз. "
+    "Отвечай только описанием, без пояснений и комментариев."
+)
+
+
+def _build_messages(
     parsed_features: List[Tuple[str, str]],
     classification: Optional[ClassificationResult],
-) -> str:
+) -> List[Dict[str, str]]:
     features_list = "\n".join(
         f"{i + 1}. {desc}: {value}"
         for i, (desc, value) in enumerate(parsed_features)
@@ -49,28 +58,29 @@ def _build_prompt(
     classification_block = ""
     if classification is not None:
         props_str = ", ".join(classification.properties) if classification.properties else "—"
-        classification_block = f"""
-КЛАССИФИКАЦИЯ ОБРАЗОВАНИЯ:
-- Тип признаков: {classification.feature_type.value}
-- Структура: {classification.structure.value}
-- Свойства: {props_str}
-- Итоговый класс: {classification.final_class}
-"""
+        classification_block = (
+            f"\n\nКЛАССИФИКАЦИЯ ОБРАЗОВАНИЯ:\n"
+            f"- Тип признаков: {classification.feature_type.value}\n"
+            f"- Структура: {classification.structure.value}\n"
+            f"- Свойства: {props_str}\n"
+            f"- Итоговый класс: {classification.final_class}"
+        )
 
-    return f"""Ты — медицинский ассистент-дерматолог. Составляй клинические описания дерматоскопических образований на русском языке. Описание должно быть профессиональным, лаконичным, 3–5 предложений. Используй только предоставленные данные. Не ставь диагноз.
+    user_content = (
+        f"Составь клиническое дерматоскопическое описание образования на основе следующих данных:\n\n"
+        f"ВАЖНЕЙШИЕ ПРИЗНАКИ (топ-{len(parsed_features)}, по убыванию значимости):\n"
+        f"{features_list}{classification_block}\n\n"
+        f"Требования к описанию:\n"
+        f"- 3–5 предложений\n"
+        f"- Профессиональный клинический стиль\n"
+        f"- Упоминай форму/симметрию, цвет/пигментацию, структуру/текстуру, контур\n"
+        f"- Только русский язык"
+    )
 
-Составь клиническое дерматоскопическое описание образования на основе следующих данных:
-
-ВАЖНЕЙШИЕ ПРИЗНАКИ (топ-{len(parsed_features)}, по убыванию значимости):
-{features_list}{classification_block}
-
-Требования к описанию:
-- 3–5 предложений
-- Профессиональный клинический стиль
-- Упоминай форму/симметрию, цвет/пигментацию, структуру/текстуру, контур
-- Только русский язык
-
-Описание:"""
+    return [
+        {"role": "system", "content": _SYSTEM_PROMPT},
+        {"role": "user", "content": user_content},
+    ]
 
 
 def _load_model(
@@ -97,8 +107,12 @@ def _load_model(
     return model, tokenizer, device
 
 
-def _generate_text(prompt: str, model, tokenizer, device: torch.device, max_tokens: int = 512) -> str:
-    inputs = tokenizer(prompt, return_tensors="pt").to(device)
+def _generate_text(
+    messages: List[Dict[str, str]], model, tokenizer, device: torch.device, max_tokens: int = 512,
+) -> str:
+    input_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    inputs = tokenizer(input_text, return_tensors="pt").to(device)
+    input_len = inputs["input_ids"].shape[1]
     with torch.no_grad():
         outputs = model.generate(
             **inputs,
@@ -107,8 +121,7 @@ def _generate_text(prompt: str, model, tokenizer, device: torch.device, max_toke
             repetition_penalty=1.2, do_sample=True,
             pad_token_id=tokenizer.eos_token_id,
         )
-    generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-    return generated_text[len(prompt):].strip()
+    return tokenizer.decode(outputs[0][input_len:], skip_special_tokens=True).strip()
 
 
 def _generate_single(
@@ -121,8 +134,8 @@ def _generate_single(
     if not important_features:
         return "Недостаточно данных для описания."
     parsed = _parse_feature_entries(important_features)
-    prompt = _build_prompt(parsed, classification)
-    return _generate_text(prompt, model, tokenizer, device, max_tokens)
+    messages = _build_messages(parsed, classification)
+    return _generate_text(messages, model, tokenizer, device, max_tokens)
 
 
 def _ensure_model(
