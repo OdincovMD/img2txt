@@ -168,6 +168,11 @@ def api_image(idx: int):
         if isinstance(value, list):
             value = ", ".join(str(v) for v in value)
 
+        # Strip prefix before colon if present (e.g. "разнообразие_оттенка:низкое" → "низкое")
+        value_str = str(value)
+        if ":" in value_str:
+            value_str = value_str.split(":", 1)[1]
+
         meta = LABEL_META.get(key, {"category": "general", "description": key})
         cat = meta["category"]
         if cat not in categories:
@@ -175,7 +180,7 @@ def api_image(idx: int):
         categories[cat].append({
             "key": key,
             "description": meta["description"],
-            "value": str(value),
+            "value": value_str,
         })
 
     # Order categories

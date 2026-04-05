@@ -39,10 +39,15 @@ def _parse_feature_entries(important_features: List[str]) -> List[Tuple[str, str
 
 _SYSTEM_PROMPT = (
     "Ты — медицинский ассистент-дерматолог. "
-    "Составляй клинические описания дерматоскопических образований на русском языке. "
-    "Описание должно быть профессиональным, лаконичным, 3–5 предложений. "
-    "Используй только предоставленные данные. Не ставь диагноз. "
-    "Отвечай только описанием, без пояснений и комментариев."
+    "Пиши ТОЛЬКО на русском языке. Никогда не используй другие языки. "
+    "Составляй клинические описания дерматоскопических образований.\n"
+    "Строгие правила:\n"
+    "1. Ровно 3-5 предложений, профессиональный клинический стиль.\n"
+    "2. Описывай только наблюдаемые признаки: форму, цвет, текстуру, границы.\n"
+    "3. ЗАПРЕЩЕНО ставить диагноз, предполагать диагноз или упоминать названия заболеваний.\n"
+    "4. ЗАПРЕЩЕНО давать рекомендации, комментарии или пояснения.\n"
+    "5. Используй только предоставленные данные, не додумывай.\n"
+    "6. Отвечай сразу текстом описания, без заголовков и преамбул."
 )
 
 
@@ -57,7 +62,7 @@ def _build_messages(
 
     classification_block = ""
     if classification is not None:
-        props_str = ", ".join(classification.properties) if classification.properties else "—"
+        props_str = ", ".join(classification.properties) if classification.properties else "\u2014"
         classification_block = (
             f"\n\nКЛАССИФИКАЦИЯ ОБРАЗОВАНИЯ:\n"
             f"- Тип признаков: {classification.feature_type.value}\n"
@@ -70,11 +75,12 @@ def _build_messages(
         f"Составь клиническое дерматоскопическое описание образования на основе следующих данных:\n\n"
         f"ВАЖНЕЙШИЕ ПРИЗНАКИ (топ-{len(parsed_features)}, по убыванию значимости):\n"
         f"{features_list}{classification_block}\n\n"
-        f"Требования к описанию:\n"
-        f"- 3–5 предложений\n"
+        f"Требования:\n"
+        f"- 3-5 предложений\n"
         f"- Профессиональный клинический стиль\n"
-        f"- Упоминай форму/симметрию, цвет/пигментацию, структуру/текстуру, контур\n"
-        f"- Только русский язык"
+        f"- Упоминай форму, цвет, текстуру, контур\n"
+        f"- Только русский язык\n"
+        f"- Без диагноза и рекомендаций"
     )
 
     return [
@@ -108,7 +114,7 @@ def _load_model(
 
 
 def _generate_text(
-    messages: List[Dict[str, str]], model, tokenizer, device: torch.device, max_tokens: int = 512,
+    messages: List[Dict[str, str]], model, tokenizer, device: torch.device, max_tokens: int = 256,
 ) -> str:
     input_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     inputs = tokenizer(input_text, return_tensors="pt").to(device)
@@ -117,8 +123,8 @@ def _generate_text(
         outputs = model.generate(
             **inputs,
             max_new_tokens=max_tokens,
-            temperature=0.7, top_p=0.9,
-            repetition_penalty=1.2, do_sample=True,
+            temperature=0.4, top_p=0.85,
+            repetition_penalty=1.15, do_sample=True,
             pad_token_id=tokenizer.eos_token_id,
         )
     return tokenizer.decode(outputs[0][input_len:], skip_special_tokens=True).strip()
@@ -128,7 +134,7 @@ def _generate_single(
     important_features: List[str],
     classification: Optional[ClassificationResult],
     model, tokenizer, device: torch.device,
-    max_tokens: int = 512,
+    max_tokens: int = 256,
 ) -> str:
     """Generate description for one set of features. Returns text or error string."""
     if not important_features:
@@ -165,7 +171,7 @@ def generate_descriptions_batch(
     classification_col: Optional[str] = "classification",
     model_name: str = "Qwen/Qwen2.5-14B-Instruct",
     device: Optional[torch.device] = None,
-    max_tokens: int = 512,
+    max_tokens: int = 256,
     use_cache: bool = True,
     verbose: bool = True,
 ) -> pd.DataFrame:
