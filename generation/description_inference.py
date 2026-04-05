@@ -1,6 +1,6 @@
 """
 Step 4: Clinical description generation.
-Converts top-k important features + optional classification → Russian clinical text via Mistral-7B.
+Converts top-k important features + optional classification → Russian clinical text via Qwen2.5-14B.
 Public API: generate_descriptions_batch(df, ...) → df with 'description' column.
 """
 
@@ -73,8 +73,8 @@ def _build_prompt(
 Описание:"""
 
 
-def _load_mistral_model(
-    model_name: str = "mistralai/Mistral-7B-Instruct-v0.1",
+def _load_model(
+    model_name: str = "Qwen/Qwen2.5-14B-Instruct",
     device: Optional[torch.device] = None,
 ) -> Tuple[Any, Any, torch.device]:
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -126,7 +126,7 @@ def _generate_single(
 
 
 def _ensure_model(
-    model_name: str = "mistralai/Mistral-7B-Instruct-v0.1",
+    model_name: str = "Qwen/Qwen2.5-14B-Instruct",
     device: Optional[torch.device] = None,
     use_cache: bool = True,
 ) -> Tuple[Any, Any, torch.device]:
@@ -135,7 +135,7 @@ def _ensure_model(
     if use_cache and _model_cache["model"] is not None:
         return _model_cache["model"], _model_cache["tokenizer"], _model_cache["device"]
 
-    model, tokenizer, device_used = _load_mistral_model(model_name, device)
+    model, tokenizer, device_used = _load_model(model_name, device)
     if use_cache:
         _model_cache["model"] = model
         _model_cache["tokenizer"] = tokenizer
@@ -150,7 +150,7 @@ def _ensure_model(
 def generate_descriptions_batch(
     df: pd.DataFrame,
     classification_col: Optional[str] = "classification",
-    model_name: str = "mistralai/Mistral-7B-Instruct-v0.1",
+    model_name: str = "Qwen/Qwen2.5-14B-Instruct",
     device: Optional[torch.device] = None,
     max_tokens: int = 512,
     use_cache: bool = True,
@@ -164,7 +164,7 @@ def generate_descriptions_batch(
             Optional: column with ClassificationResult objects (see classification_col).
         classification_col: Column name containing ClassificationResult objects.
             If column doesn't exist or value is None, classification block is omitted.
-        model_name: HuggingFace model ID for Mistral
+        model_name: HuggingFace model ID
         device: torch device (defaults to cuda if available)
         max_tokens: Max tokens per description
         use_cache: Cache model in memory for subsequent calls
