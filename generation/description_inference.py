@@ -1,6 +1,6 @@
 """
 Step 4: Clinical description generation.
-Converts top-k important features + optional classification → Russian clinical text via Qwen2.5-14B.
+Converts top-k important features + optional classification → Russian clinical text via Qwen2.5-7B.
 Public API: generate_descriptions_batch(df, ...) → df with 'description' column.
 """
 
@@ -90,7 +90,7 @@ def _build_messages(
 
 
 def _load_model(
-    model_name: str = "Qwen/Qwen2.5-14B-Instruct",
+    model_name: str = "Qwen/Qwen2.5-7B-Instruct",
     device: Optional[torch.device] = None,
 ) -> Tuple[Any, Any, torch.device]:
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -145,7 +145,7 @@ def _generate_single(
 
 
 def _ensure_model(
-    model_name: str = "Qwen/Qwen2.5-14B-Instruct",
+    model_name: str = "Qwen/Qwen2.5-7B-Instruct",
     device: Optional[torch.device] = None,
     use_cache: bool = True,
 ) -> Tuple[Any, Any, torch.device]:
@@ -169,7 +169,7 @@ def _ensure_model(
 def generate_descriptions_batch(
     df: pd.DataFrame,
     classification_col: Optional[str] = "classification",
-    model_name: str = "Qwen/Qwen2.5-14B-Instruct",
+    model_name: str = "Qwen/Qwen2.5-7B-Instruct",
     device: Optional[torch.device] = None,
     max_tokens: int = 256,
     use_cache: bool = True,
