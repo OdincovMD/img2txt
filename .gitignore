@@ -14,3 +14,5 @@ env/
 .DS_Store
 *.bak
 CLAUDE.md
+tmp/
+features_dataset_bucket.csv

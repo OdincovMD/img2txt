@@ -5,6 +5,7 @@ Public API: rank_features_batch(df, ...) → df with 'important_labels' column.
 """
 
 import json
+import random
 from pathlib import Path
 from typing import List, Optional, Union
 
@@ -97,6 +98,31 @@ def _top10_indices_to_labels(
     return result[:k]
 
 
+def _random_extra_labels(
+    selected_indices: List[int],
+    labels_dict: dict,
+    n: int = 2,
+) -> List[str]:
+    """Pick n random unselected labels and return as 'feature:value' strings."""
+    selected_set = set(selected_indices)
+    unselected = [i for i in range(len(LABEL_NAMES)) if i not in selected_set]
+    random.shuffle(unselected)
+    extras = []
+    for i in unselected:
+        if len(extras) >= n:
+            break
+        key = LABEL_NAMES[i]
+        val = labels_dict.get(key)
+        if isinstance(val, str):
+            extras.append(f"{key}:{val}")
+        elif isinstance(val, dict):
+            for subk, subv in val.items():
+                if isinstance(subv, str):
+                    extras.append(f"{key}.{subk}:{subv}")
+                    break
+    return extras[:n]
+
+
 def _predict_top10(
     model: ImportanceModel,
     image: np.ndarray,
@@ -106,8 +132,9 @@ def _predict_top10(
     image_size: int = 224,
     k: int = 10,
     mask: Optional[np.ndarray] = None,
+    n_random: int = 2,
 ) -> List[str]:
-    """Single-sample prediction: image (H,W,3) + labels → top-k 'feature:value' strings."""
+    """Single-sample prediction: image (H,W,3) + labels → top-k + n_random 'feature:value' strings."""
     if hasattr(model, "head") and next(model.backbone.parameters()).shape[1] == 4 and image.shape[-1] == 3:
         if mask is None:
             mask = np.zeros((image.shape[0], image.shape[1], 1), dtype=np.uint8)
@@ -124,8 +151,11 @@ def _predict_top10(
     with torch.no_grad():
         logits = model(x)
     probs = torch.sigmoid(logits[0]).cpu().numpy()
-    top10_idx = np.argsort(probs)[::-1][:k].tolist()
-    return _top10_indices_to_labels(top10_idx, labels_dict, k=k)
+    top_idx = np.argsort(probs)[::-1][:k].tolist()
+    selected = _top10_indices_to_labels(top_idx, labels_dict, k=k)
+    if n_random > 0:
+        selected += _random_extra_labels(top_idx, labels_dict, n=n_random)
+    return selected
 
 
 def _predict_from_row(
@@ -137,6 +167,7 @@ def _predict_from_row(
     transform=None,
     image_size: int = 224,
     k: int = 10,
+    n_random: int = 2,
 ) -> List[str]:
     """Predict from a DataFrame row. Reads image from row['image_path'], labels from row['features_json']."""
     from PIL import Image
@@ -155,7 +186,10 @@ def _predict_from_row(
         if mask_path.is_file():
             mask = np.array(Image.open(mask_path).convert("L")) > 0
 
-    return _predict_top10(model, image, labels_dict, device, transform=transform, image_size=image_size, k=k, mask=mask)
+    return _predict_top10(
+        model, image, labels_dict, device,
+        transform=transform, image_size=image_size, k=k, mask=mask, n_random=n_random,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -168,6 +202,7 @@ def rank_features_batch(
     device: Optional[torch.device] = None,
     image_size: int = 224,
     k: int = 10,
+    n_random: int = 2,
     mask_dir: Optional[Union[str, Path]] = None,
     verbose: bool = True,
 ) -> pd.DataFrame:
@@ -180,13 +215,14 @@ def rank_features_batch(
             If None, 'important_labels' will be empty lists.
         device: torch device (defaults to cuda if available)
         image_size: Input image size for model
-        k: Number of top features to return per image
+        k: Number of top features selected by model
+        n_random: Number of random unselected features to append (default 2, total = k + n_random)
         mask_dir: Optional directory with mask files
         verbose: Show progress bar
 
     Returns:
         df with added column:
-        - important_labels: list of top-k strings ["feature:value", ...]
+        - important_labels: list of k + n_random strings ["feature:value", ...]
     """
     df = df.copy()
 
@@ -208,7 +244,7 @@ def rank_features_batch(
             pred = _predict_from_row(
                 model, row, device,
                 mask_dir=mask_dir, transform=transform,
-                image_size=image_size, k=k,
+                image_size=image_size, k=k, n_random=n_random,
             )
             results.append(pred)
 
