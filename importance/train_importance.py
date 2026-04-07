@@ -1,6 +1,12 @@
 """
 Обучение модели отбора важных признаков.
 Запуск: train_importance(data_csv=..., image_dir=...) из ноутбука или скрипта.
+
+Поддерживает смешивание реальной разметки (500+) с псевдо-разметкой:
+  - pseudo_csv: CSV с псевдо-метками (те же колонки, что и data_csv)
+  - pseudo_weight: вес псевдо-примеров в функции потерь (по умолчанию 0.3)
+  - freeze_backbone_epochs: сколько эпох обучать только голову (warmup)
+  - label_smoothing: сглаживание меток (уменьшает overfit на шумные метки)
 """
 
 import json
@@ -12,7 +18,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from tqdm import tqdm
 
 try:
@@ -42,15 +48,24 @@ def get_transform(image_size: int = 224, is_training: bool = True, in_channels: 
     if transforms is None:
         raise ImportError("torchvision required for transforms.")
     if in_channels == 3:
-        base = [
-            transforms.ToPILImage(),
-            transforms.Resize((image_size, image_size)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        ]
         if is_training:
-            base.insert(2, transforms.RandomHorizontalFlip(p=0.5))
-            base.insert(3, transforms.RandomVerticalFlip(p=0.5))
+            base = [
+                transforms.ToPILImage(),
+                transforms.RandomResizedCrop(image_size, scale=(0.8, 1.0), ratio=(0.9, 1.1)),
+                transforms.RandomHorizontalFlip(p=0.5),
+                transforms.RandomVerticalFlip(p=0.5),
+                transforms.RandomRotation(degrees=30),
+                transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.2, hue=0.05),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ]
+        else:
+            base = [
+                transforms.ToPILImage(),
+                transforms.Resize((image_size, image_size)),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ]
         return transforms.Compose(base)
 
     from PIL import Image as PILImage
@@ -60,15 +75,29 @@ def get_transform(image_size: int = 224, is_training: bool = True, in_channels: 
         mask = img[..., 3:4].squeeze(-1)
         if mask.max() <= 1:
             mask = (mask * 255).astype(np.uint8)
-        rgb_pil = PILImage.fromarray(rgb).resize((image_size, image_size))
-        mask_pil = PILImage.fromarray(mask).resize((image_size, image_size))
+
+        rgb_pil = PILImage.fromarray(rgb)
+        mask_pil = PILImage.fromarray(mask)
+
         if is_training:
+            # Spatial transforms — применяем одинаково к RGB и маске
             if random.random() > 0.5:
                 rgb_pil = rgb_pil.transpose(PILImage.FLIP_LEFT_RIGHT)
                 mask_pil = mask_pil.transpose(PILImage.FLIP_LEFT_RIGHT)
             if random.random() > 0.5:
                 rgb_pil = rgb_pil.transpose(PILImage.FLIP_TOP_BOTTOM)
                 mask_pil = mask_pil.transpose(PILImage.FLIP_TOP_BOTTOM)
+            angle = random.uniform(-30, 30)
+            rgb_pil = rgb_pil.rotate(angle, resample=PILImage.BILINEAR)
+            mask_pil = mask_pil.rotate(angle, resample=PILImage.NEAREST)
+            # ColorJitter только для RGB
+            rgb_pil = transforms.ColorJitter(
+                brightness=0.3, contrast=0.3, saturation=0.2, hue=0.05
+            )(rgb_pil)
+
+        rgb_pil = rgb_pil.resize((image_size, image_size))
+        mask_pil = mask_pil.resize((image_size, image_size))
+
         rgb_t = transforms.ToTensor()(rgb_pil)
         mask_t = torch.from_numpy(np.array(mask_pil)).float().unsqueeze(0) / 255.0
         x = torch.cat([rgb_t, mask_t], dim=0)
@@ -80,29 +109,44 @@ def get_transform(image_size: int = 224, is_training: bool = True, in_channels: 
     return transform_4ch
 
 
+def _smooth_targets(targets: torch.Tensor, smoothing: float) -> torch.Tensor:
+    """Label smoothing: 1 → 1-ε, 0 → ε."""
+    return targets * (1.0 - smoothing) + smoothing * 0.5
+
+
 def train_importance(
     data_csv: Union[str, Path],
     image_dir: Union[str, Path],
     *,
+    pseudo_csv: Optional[Union[str, Path]] = None,
+    pseudo_weight: float = 0.3,
     mask_dir: Optional[Union[str, Path]] = None,
     image_col: str = "filename",
     image_id_col: str = "image_id",
     val_ratio: float = 0.15,
     splits_file: Optional[Union[str, Path]] = None,
     backbone: BackboneName = "efficientnet_b0",
-    epochs: int = 30,
+    epochs: int = 50,
     batch_size: int = 16,
     lr: float = 1e-4,
     image_size: int = 224,
     use_mask: bool = False,
+    freeze_backbone_epochs: int = 5,
+    label_smoothing: float = 0.05,
     out_dir: Union[str, Path] = "importance_checkpoints",
     seed: int = RANDOM_STATE,
 ) -> float:
     """
-    Обучает модель; сохраняет лучший чекпоинт в ``out_dir / best.pt`` и при случайном
-    сплите — ``out_dir / splits.json``.
+    Обучает модель; сохраняет лучший чекпоинт в ``out_dir / best.pt``.
 
-    Требования к CSV: колонки ``image_id``, ``filename`` (или задайте *_col), ``important_labels``.
+    Args:
+        data_csv: CSV с реальной разметкой (колонки: image_id, filename, important_labels).
+        image_dir: Корень директории с изображениями.
+        pseudo_csv: CSV с псевдо-разметкой (те же колонки). Будет смешан с data_csv.
+        pseudo_weight: Вес псевдо-примеров в функции потерь (0..1). Реальные всегда 1.0.
+        freeze_backbone_epochs: Число эпох warmup с замороженным бэкбоном.
+        label_smoothing: Сглаживание меток (0.0 = выкл, 0.05–0.1 рекомендуется).
+        epochs: Полное число эпох (включая freeze_backbone_epochs).
 
     Returns:
         Лучший score на валидации ((P@10 + R@10) / 2).
@@ -117,38 +161,64 @@ def train_importance(
     image_dir = str(image_dir)
     mask_dir_s = str(mask_dir) if mask_dir is not None else None
 
-    df = pd.read_csv(data_csv)
-    if image_id_col not in df.columns and "image_id" in df.columns:
+    # ---- Загрузка данных ----
+    df_real = pd.read_csv(data_csv)
+    df_real["_is_pseudo"] = False
+
+    if pseudo_csv is not None:
+        df_pseudo = pd.read_csv(pseudo_csv)
+        df_pseudo["_is_pseudo"] = True
+        df_all = pd.concat([df_real, df_pseudo], ignore_index=True)
+        print(f"Real: {len(df_real)}, Pseudo: {len(df_pseudo)}, Total: {len(df_all)}")
+    else:
+        df_all = df_real.copy()
+        print(f"Real: {len(df_real)} (no pseudo-labels)")
+
+    # Нормализуем имена колонок
+    if image_id_col not in df_all.columns and "image_id" in df_all.columns:
         image_id_col = "image_id"
-    if image_col not in df.columns and "filename" in df.columns:
+    if image_col not in df_all.columns and "filename" in df_all.columns:
         image_col = "filename"
+
+    # Валидация — только из реальной разметки
+    real_mask = ~df_all["_is_pseudo"]
+    df_real_only = df_all[real_mask].copy()
 
     if splits_file and Path(splits_file).is_file():
         with open(splits_file) as f:
             splits = json.load(f)
         if "train_idx" in splits:
-            train_idx = splits["train_idx"]
-            val_idx = splits["val_idx"]
+            val_real_ids = set(df_real_only.iloc[splits["val_idx"]][image_id_col].tolist())
         else:
-            train_ids = set(splits.get("train", []))
-            val_ids = set(splits.get("val", []))
-            train_idx = [i for i, x in df[image_id_col].items() if x in train_ids]
-            val_idx = [i for i, x in df[image_id_col].items() if x in val_ids]
-        train_df = df.iloc[train_idx].copy()
-        val_df = df.iloc[val_idx].copy()
+            val_real_ids = set(splits.get("val", []))
     else:
-        n = len(df)
-        n_val = max(1, int(n * val_ratio))
+        n_real = len(df_real_only)
+        n_val = max(1, int(n_real * val_ratio))
         rng = np.random.RandomState(seed)
-        perm = rng.permutation(n)
-        val_pos = perm[:n_val]
-        train_pos = perm[n_val:]
-        train_df = df.iloc[train_pos].copy()
-        val_df = df.iloc[val_pos].copy()
-        splits = {"train_idx": train_df.index.tolist(), "val_idx": val_df.index.tolist()}
+        perm = rng.permutation(n_real)
+        val_ids_local = perm[:n_val]
+        val_real_ids = set(df_real_only.iloc[val_ids_local][image_id_col].tolist())
+        splits = {
+            "val_ids": list(val_real_ids),
+            "note": "val is always from real-labeled data only",
+        }
         with open(out_dir / "splits.json", "w") as f:
             json.dump(splits, f, indent=2)
 
+    val_mask = df_all[image_id_col].isin(val_real_ids)
+    val_df = df_all[val_mask & real_mask].copy()
+    train_df = df_all[~val_mask].copy()
+
+    print(f"Train: {len(train_df)} ({(~train_df['_is_pseudo']).sum()} real + {train_df['_is_pseudo'].sum()} pseudo)")
+    print(f"Val:   {len(val_df)} (real only)")
+
+    # Веса для взвешенной функции потерь
+    train_weights = torch.tensor(
+        [pseudo_weight if p else 1.0 for p in train_df["_is_pseudo"].tolist()],
+        dtype=torch.float32,
+    )
+
+    # ---- Трансформы ----
     in_channels = 4 if use_mask else 3
     transform_train = get_transform(image_size, is_training=True, in_channels=in_channels)
     transform_val = get_transform(image_size, is_training=False, in_channels=in_channels)
@@ -171,50 +241,96 @@ def train_importance(
         transform=transform_val,
         use_mask_channel=use_mask,
     )
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=True)
+
+    # WeightedRandomSampler: реальные примеры семплируются чаще
+    sampler_weights = [1.0 if not p else pseudo_weight for p in train_df["_is_pseudo"].tolist()]
+    sampler = WeightedRandomSampler(
+        weights=sampler_weights,
+        num_samples=len(train_ds),
+        replacement=True,
+    )
+
+    train_loader = DataLoader(
+        train_ds, batch_size=batch_size, sampler=sampler, num_workers=0, pin_memory=True,
+    )
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=0)
 
+    # ---- Модель ----
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = ImportanceModel(
         backbone_name=backbone,
         num_labels=NUM_LABELS,
         pretrained=True,
         in_channels=in_channels,
-        dropout=0.2,
+        dropout=0.3,
     ).to(device)
-    criterion = nn.BCEWithLogitsLoss()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+
+    # BCE без редукции — для взвешивания по примерам
+    criterion = nn.BCEWithLogitsLoss(reduction="none")
+
+    # Два набора параметров: голова и бэкбон (разные lr)
+    head_params = list(model.head.parameters())
+    backbone_params = list(model.backbone.parameters())
+    optimizer = torch.optim.AdamW([
+        {"params": head_params, "lr": lr},
+        {"params": backbone_params, "lr": lr * 0.1},
+    ], weight_decay=1e-4)
+
+    # Freeze backbone на первые freeze_backbone_epochs эпох
+    def set_backbone_grad(requires_grad: bool):
+        for p in backbone_params:
+            p.requires_grad = requires_grad
+
+    if freeze_backbone_epochs > 0:
+        set_backbone_grad(False)
+        print(f"Backbone frozen for first {freeze_backbone_epochs} epochs (warmup)")
+
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+
+    train_weights = train_weights.to(device)
 
     run_config = {
         "data_csv": str(data_csv.resolve()),
+        "pseudo_csv": str(pseudo_csv) if pseudo_csv else None,
+        "pseudo_weight": pseudo_weight,
         "image_dir": image_dir,
         "mask_dir": mask_dir_s,
-        "image_col": image_col,
-        "image_id_col": image_id_col,
-        "val_ratio": val_ratio,
-        "splits_file": str(splits_file) if splits_file else None,
         "backbone": backbone,
         "epochs": epochs,
         "batch_size": batch_size,
         "lr": lr,
         "image_size": image_size,
         "use_mask": use_mask,
+        "freeze_backbone_epochs": freeze_backbone_epochs,
+        "label_smoothing": label_smoothing,
         "out_dir": str(out_dir),
         "seed": seed,
     }
 
     best_score = 0.0
     for epoch in range(epochs):
+        # Размораживаем бэкбон после warmup
+        if freeze_backbone_epochs > 0 and epoch == freeze_backbone_epochs:
+            set_backbone_grad(True)
+            print(f"Epoch {epoch+1}: backbone unfrozen")
+
         model.train()
         running_loss = 0.0
         for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}", leave=False):
             images = batch["image"].to(device)
             targets = batch["target"].to(device)
+            idx = batch["idx"]
+            w = train_weights[idx].unsqueeze(1)  # (B, 1) — broadcast по меткам
+
             optimizer.zero_grad()
             logits = model(images)
-            loss = criterion(logits, targets)
+
+            smooth_targets = _smooth_targets(targets, label_smoothing)
+            loss_mat = criterion(logits, smooth_targets)  # (B, num_labels)
+            loss = (loss_mat * w).mean()
+
             loss.backward()
+            nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             running_loss += loss.item()
         scheduler.step()
@@ -229,7 +345,7 @@ def train_importance(
                 images = batch["image"].to(device)
                 targets = batch["target"].to(device)
                 logits = model(images)
-                loss = criterion(logits, targets)
+                loss = criterion(logits, targets).mean()
                 val_loss += loss.item()
                 all_logits.append(logits)
                 all_targets.append(targets)
@@ -239,8 +355,10 @@ def train_importance(
         prec10, rec10 = precision_recall_at_k_batch(logits_cat, targets_cat, k=10)
         score = (prec10 + rec10) / 2.0
 
+        backbone_frozen = epoch < freeze_backbone_epochs
         print(
-            f"Epoch {epoch+1}  train_loss={train_loss:.4f}  val_loss={val_loss:.4f}  "
+            f"Epoch {epoch+1}{'*' if backbone_frozen else ' '} "
+            f"train_loss={train_loss:.4f}  val_loss={val_loss:.4f}  "
             f"P@10={prec10:.4f}  R@10={rec10:.4f}  score={score:.4f}"
         )
 
