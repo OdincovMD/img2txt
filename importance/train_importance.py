@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, WeightedRandomSampler
+from torch.utils.data import DataLoader, WeightedRandomSampler, default_collate
 from tqdm import tqdm
 
 try:
@@ -34,6 +34,18 @@ from importance.importance_model import ImportanceModel
 RANDOM_STATE = 42
 
 BackboneName = Literal["efficientnet_b0", "resnet18", "resnet34"]
+
+
+def _collate_fn(batch):
+    """Default collate, but string fields are kept as plain lists."""
+    result = {}
+    for key in batch[0]:
+        vals = [b[key] for b in batch]
+        if isinstance(vals[0], str):
+            result[key] = vals
+        else:
+            result[key] = default_collate(vals)
+    return result
 
 
 def set_seed(seed: int):
@@ -251,9 +263,13 @@ def train_importance(
     )
 
     train_loader = DataLoader(
-        train_ds, batch_size=batch_size, sampler=sampler, num_workers=0, pin_memory=True,
+        train_ds, batch_size=batch_size, sampler=sampler,
+        num_workers=0, pin_memory=True, collate_fn=_collate_fn,
     )
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=0)
+    val_loader = DataLoader(
+        val_ds, batch_size=batch_size, shuffle=False,
+        num_workers=0, collate_fn=_collate_fn,
+    )
 
     # ---- Модель ----
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
