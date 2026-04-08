@@ -149,6 +149,9 @@ def train_importance(
     use_mask: bool = False,
     freeze_backbone_epochs: int = 5,
     label_smoothing: float = 0.05,
+    num_workers: int = 4,
+    use_amp: bool = True,
+    multi_gpu: bool = True,
     out_dir: Union[str, Path] = "importance_checkpoints",
     seed: int = RANDOM_STATE,
 ) -> float:
@@ -266,13 +269,20 @@ def train_importance(
         replacement=True,
     )
 
+    loader_kwargs = dict(
+        num_workers=num_workers,
+        pin_memory=True,
+        collate_fn=_collate_fn,
+        persistent_workers=(num_workers > 0),
+    )
+    if num_workers > 0:
+        loader_kwargs["prefetch_factor"] = 4
+
     train_loader = DataLoader(
-        train_ds, batch_size=batch_size, sampler=sampler,
-        num_workers=0, pin_memory=True, collate_fn=_collate_fn,
+        train_ds, batch_size=batch_size, sampler=sampler, **loader_kwargs,
     )
     val_loader = DataLoader(
-        val_ds, batch_size=batch_size, shuffle=False,
-        num_workers=0, collate_fn=_collate_fn,
+        val_ds, batch_size=batch_size, shuffle=False, **loader_kwargs,
     )
 
     # ---- Модель ----
@@ -289,6 +299,7 @@ def train_importance(
     criterion = nn.BCEWithLogitsLoss(reduction="none")
 
     # Два набора параметров: голова и бэкбон (разные lr)
+    # NB: берём параметры ДО оборачивания в DataParallel
     head_params = list(model.head.parameters())
     backbone_params = list(model.backbone.parameters())
     optimizer = torch.optim.AdamW([
@@ -308,6 +319,20 @@ def train_importance(
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
 
     train_weights = train_weights.to(device)
+
+    # Multi-GPU: оборачиваем в DataParallel ПОСЛЕ создания optimizer
+    n_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    if multi_gpu and n_gpus > 1:
+        model = nn.DataParallel(model)
+        print(f"Using DataParallel on {n_gpus} GPUs")
+    else:
+        print(f"Using single device: {device} (n_gpus={n_gpus})")
+
+    # AMP (mixed precision) — сильно ускоряет на T4/V100/A100
+    amp_enabled = use_amp and device.type == "cuda"
+    scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
+    if amp_enabled:
+        print("Mixed precision (AMP) enabled")
 
     run_config = {
         "data_csv": str(data_csv.resolve()),
@@ -337,21 +362,27 @@ def train_importance(
         model.train()
         running_loss = 0.0
         for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}", leave=False):
-            images = batch["image"].to(device)
-            targets = batch["target"].to(device)
+            images = batch["image"].to(device, non_blocking=True)
+            targets = batch["target"].to(device, non_blocking=True)
             idx = batch["idx"]
-            w = train_weights[idx].unsqueeze(1)  # (B, 1) — broadcast по меткам
+            if isinstance(idx, torch.Tensor):
+                w = train_weights[idx.to(device)].unsqueeze(1)
+            else:
+                w = train_weights[torch.as_tensor(idx, device=device)].unsqueeze(1)
 
-            optimizer.zero_grad()
-            logits = model(images)
+            optimizer.zero_grad(set_to_none=True)
 
-            smooth_targets = _smooth_targets(targets, label_smoothing)
-            loss_mat = criterion(logits, smooth_targets)  # (B, num_labels)
-            loss = (loss_mat * w).mean()
+            with torch.cuda.amp.autocast(enabled=amp_enabled):
+                logits = model(images)
+                smooth_targets = _smooth_targets(targets, label_smoothing)
+                loss_mat = criterion(logits, smooth_targets)
+                loss = (loss_mat * w).mean()
 
-            loss.backward()
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
             running_loss += loss.item()
         scheduler.step()
         train_loss = running_loss / len(train_loader)
@@ -362,12 +393,13 @@ def train_importance(
         all_targets = []
         with torch.no_grad():
             for batch in val_loader:
-                images = batch["image"].to(device)
-                targets = batch["target"].to(device)
-                logits = model(images)
-                loss = criterion(logits, targets).mean()
+                images = batch["image"].to(device, non_blocking=True)
+                targets = batch["target"].to(device, non_blocking=True)
+                with torch.cuda.amp.autocast(enabled=amp_enabled):
+                    logits = model(images)
+                    loss = criterion(logits, targets).mean()
                 val_loss += loss.item()
-                all_logits.append(logits)
+                all_logits.append(logits.float())
                 all_targets.append(targets)
         val_loss /= len(val_loader)
         logits_cat = torch.cat(all_logits, dim=0)
@@ -384,9 +416,11 @@ def train_importance(
 
         if score > best_score:
             best_score = score
+            # Разворачиваем DataParallel перед сохранением
+            state_dict = model.module.state_dict() if isinstance(model, nn.DataParallel) else model.state_dict()
             ckpt = {
                 "epoch": epoch + 1,
-                "model_state_dict": model.state_dict(),
+                "model_state_dict": state_dict,
                 "optimizer_state_dict": optimizer.state_dict(),
                 "score": score,
                 "prec10": prec10,
