@@ -37,14 +37,18 @@ BackboneName = Literal["efficientnet_b0", "resnet18", "resnet34"]
 
 
 def _collate_fn(batch):
-    """Default collate, but string fields are kept as plain lists."""
+    """Robust collate: tries default_collate per field, falls back to plain list."""
     result = {}
     for key in batch[0]:
         vals = [b[key] for b in batch]
-        if isinstance(vals[0], str):
+        # Для строковых полей сразу пропускаем default_collate
+        if any(isinstance(v, str) for v in vals):
             result[key] = vals
-        else:
+            continue
+        try:
             result[key] = default_collate(vals)
+        except (TypeError, RuntimeError, ValueError):
+            result[key] = vals
     return result
 
 
