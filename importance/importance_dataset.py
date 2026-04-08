@@ -84,6 +84,8 @@ class ImportanceDataset(Dataset):
         label_columns: Optional[List[str]] = None,
         transform=None,
         use_mask_channel: bool = False,
+        preload_to_memory: bool = False,
+        preload_size: int = 256,
     ):
         """
         table: DataFrame с колонками для пути к изображению и разметкой эксперта.
@@ -94,6 +96,11 @@ class ImportanceDataset(Dataset):
         label_columns: список колонок с метками эксперта (label_1 ... label_10 или свои).
         transform: torchvision transform (нормализация, ресайз и т.д.).
         use_mask_channel: если True, конкатенировать маску как 4-й канал к RGB (нужен mask_dir).
+        preload_to_memory: если True, все картинки декодируются и ресайзятся один раз
+            при инициализации и хранятся в RAM (ускоряет обучение на медленных ФС
+            типа kaggle fuse mount). Маски также кэшируются.
+        preload_size: размер короткой стороны при препроцессинге (картинки ресайзятся
+            до preload_size на короткой стороне с сохранением пропорций).
         """
         self.table = table.reset_index(drop=True)
         self.image_dir = Path(image_dir)
@@ -104,6 +111,65 @@ class ImportanceDataset(Dataset):
         self.label_columns = label_columns
         self.transform = transform
         self.use_mask_channel = use_mask_channel
+        self.preload_size = preload_size
+        self._cache: Optional[List[np.ndarray]] = None
+        self._mask_cache: Optional[List[Optional[np.ndarray]]] = None
+
+        if preload_to_memory:
+            self._preload()
+
+    def _resolve_image_path(self, row) -> Path:
+        fname = row[self.image_col]
+        image_id = row[self.image_id_col]
+        image_path = self.image_dir / fname
+        if not image_path.is_file():
+            image_path = self.image_dir / image_id / fname
+        if not image_path.is_file():
+            raise FileNotFoundError(f"Image not found: {image_path}")
+        return image_path
+
+    def _resize_keep_aspect(self, img: np.ndarray) -> np.ndarray:
+        h, w = img.shape[:2]
+        if min(h, w) <= self.preload_size:
+            return img
+        if h < w:
+            new_h = self.preload_size
+            new_w = int(round(w * self.preload_size / h))
+        else:
+            new_w = self.preload_size
+            new_h = int(round(h * self.preload_size / w))
+        pil = Image.fromarray(img)
+        pil = pil.resize((new_w, new_h), Image.BILINEAR)
+        return np.array(pil)
+
+    def _preload(self):
+        from tqdm import tqdm
+        cache = []
+        mask_cache = []
+        total_mb = 0.0
+        for i in tqdm(range(len(self.table)), desc="Preloading images"):
+            row = self.table.iloc[i]
+            path = self._resolve_image_path(row)
+            img = np.array(Image.open(path).convert("RGB"))
+            img = self._resize_keep_aspect(img)
+            cache.append(img)
+            total_mb += img.nbytes / 1e6
+
+            if self.use_mask_channel and self.mask_dir:
+                image_id = row[self.image_id_col]
+                mask_path = self.mask_dir / f"{image_id}{self.mask_suffix}"
+                if mask_path.is_file():
+                    m = np.array(Image.open(mask_path).convert("L"))
+                    m = (m > 0).astype(np.uint8)
+                    m = self._resize_keep_aspect(m[:, :, None])[:, :, 0]
+                    mask_cache.append(m)
+                else:
+                    mask_cache.append(None)
+            else:
+                mask_cache.append(None)
+        self._cache = cache
+        self._mask_cache = mask_cache
+        print(f"Preloaded {len(cache)} images ({total_mb:.1f} MB in RAM)")
 
     def __len__(self) -> int:
         return len(self.table)
@@ -123,20 +189,22 @@ class ImportanceDataset(Dataset):
 
     def __getitem__(self, idx: int):
         row = self.table.iloc[idx]
-        fname = row[self.image_col]
         image_id = row[self.image_id_col]
-        image_path = self.image_dir / fname
-        if not image_path.is_file():
-            image_path = self.image_dir / image_id / fname
-        if not image_path.is_file():
-            raise FileNotFoundError(f"Image not found: {image_path}")
 
-        image = self._load_image(image_path)
-        if self.use_mask_channel and self.mask_dir:
-            mask = self._load_mask(image_id)
-            if mask is not None:
-                mask = np.expand_dims(mask, axis=-1)
-                image = np.concatenate([image, mask], axis=-1)
+        if self._cache is not None:
+            image = self._cache[idx]
+            if self.use_mask_channel:
+                mask = self._mask_cache[idx]
+                if mask is not None:
+                    image = np.concatenate([image, mask[..., None]], axis=-1)
+        else:
+            image_path = self._resolve_image_path(row)
+            image = self._load_image(image_path)
+            if self.use_mask_channel and self.mask_dir:
+                mask = self._load_mask(image_id)
+                if mask is not None:
+                    mask = np.expand_dims(mask, axis=-1)
+                    image = np.concatenate([image, mask], axis=-1)
 
         expert_strings = parse_expert_labels(row, self.label_columns)
         target = build_target_vector(expert_strings)

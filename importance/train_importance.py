@@ -152,6 +152,8 @@ def train_importance(
     num_workers: int = 4,
     use_amp: bool = True,
     multi_gpu: bool = True,
+    preload_to_memory: bool = True,
+    preload_size: int = 256,
     out_dir: Union[str, Path] = "importance_checkpoints",
     seed: int = RANDOM_STATE,
 ) -> float:
@@ -250,6 +252,8 @@ def train_importance(
         mask_dir=mask_dir_s,
         transform=transform_train,
         use_mask_channel=use_mask,
+        preload_to_memory=preload_to_memory,
+        preload_size=preload_size,
     )
     val_ds = ImportanceDataset(
         val_df,
@@ -259,6 +263,8 @@ def train_importance(
         mask_dir=mask_dir_s,
         transform=transform_val,
         use_mask_channel=use_mask,
+        preload_to_memory=preload_to_memory,
+        preload_size=preload_size,
     )
 
     # WeightedRandomSampler: реальные примеры семплируются чаще
@@ -330,9 +336,12 @@ def train_importance(
 
     # AMP (mixed precision) — сильно ускоряет на T4/V100/A100
     amp_enabled = use_amp and device.type == "cuda"
-    scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
+    scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
     if amp_enabled:
         print("Mixed precision (AMP) enabled")
+
+    # cudnn autotuner — ускоряет свёртки при фиксированном input size
+    torch.backends.cudnn.benchmark = True
 
     run_config = {
         "data_csv": str(data_csv.resolve()),
@@ -372,7 +381,7 @@ def train_importance(
 
             optimizer.zero_grad(set_to_none=True)
 
-            with torch.cuda.amp.autocast(enabled=amp_enabled):
+            with torch.amp.autocast("cuda", enabled=amp_enabled):
                 logits = model(images)
                 smooth_targets = _smooth_targets(targets, label_smoothing)
                 loss_mat = criterion(logits, smooth_targets)
@@ -395,7 +404,7 @@ def train_importance(
             for batch in val_loader:
                 images = batch["image"].to(device, non_blocking=True)
                 targets = batch["target"].to(device, non_blocking=True)
-                with torch.cuda.amp.autocast(enabled=amp_enabled):
+                with torch.amp.autocast("cuda", enabled=amp_enabled):
                     logits = model(images)
                     loss = criterion(logits, targets).mean()
                 val_loss += loss.item()
