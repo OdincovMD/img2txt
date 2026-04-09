@@ -79,18 +79,32 @@ def set_seed(seed: int):
         torch.cuda.manual_seed_all(seed)
 
 
-def get_transform(image_size: int = 224, is_training: bool = True, in_channels: int = 3):
+def get_transform(image_size: int = 224, is_training: bool = True, in_channels: int = 3, aug_strength: str = "mild"):
     if transforms is None:
         raise ImportError("torchvision required for transforms.")
+    # Параметры аугментации по силе
+    # mild: безопасно для дерматоскопии (не трогает цвет, не режет границы)
+    # strong: исходный агрессивный вариант
+    if aug_strength == "mild":
+        crop_scale = (0.92, 1.0)
+        rot_deg = 15
+        cj_brightness, cj_contrast, cj_sat, cj_hue = 0.15, 0.15, 0.10, 0.0
+    elif aug_strength == "strong":
+        crop_scale = (0.8, 1.0)
+        rot_deg = 30
+        cj_brightness, cj_contrast, cj_sat, cj_hue = 0.3, 0.3, 0.2, 0.05
+    else:
+        raise ValueError(f"Unknown aug_strength: {aug_strength}")
+
     if in_channels == 3:
         if is_training:
             base = [
                 transforms.ToPILImage(),
-                transforms.RandomResizedCrop(image_size, scale=(0.8, 1.0), ratio=(0.9, 1.1)),
+                transforms.RandomResizedCrop(image_size, scale=crop_scale, ratio=(0.95, 1.05)),
                 transforms.RandomHorizontalFlip(p=0.5),
                 transforms.RandomVerticalFlip(p=0.5),
-                transforms.RandomRotation(degrees=30),
-                transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.2, hue=0.05),
+                transforms.RandomRotation(degrees=rot_deg),
+                transforms.ColorJitter(brightness=cj_brightness, contrast=cj_contrast, saturation=cj_sat, hue=cj_hue),
                 transforms.ToTensor(),
                 transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             ]
@@ -171,6 +185,7 @@ def train_importance(
     label_smoothing: float = 0.05,
     use_pos_weight: bool = True,
     pos_weight_cap: float = 10.0,
+    aug_strength: Literal["mild", "strong"] = "mild",
     loss_type: Literal["bce", "focal"] = "bce",
     focal_gamma: float = 2.0,
     weight_decay: float = 1e-3,
@@ -272,8 +287,9 @@ def train_importance(
 
     # ---- Трансформы ----
     in_channels = 4 if use_mask else 3
-    transform_train = get_transform(image_size, is_training=True, in_channels=in_channels)
-    transform_val = get_transform(image_size, is_training=False, in_channels=in_channels)
+    transform_train = get_transform(image_size, is_training=True, in_channels=in_channels, aug_strength=aug_strength)
+    transform_val = get_transform(image_size, is_training=False, in_channels=in_channels, aug_strength=aug_strength)
+    print(f"Augmentation: {aug_strength}")
 
     train_ds = ImportanceDataset(
         train_df,
