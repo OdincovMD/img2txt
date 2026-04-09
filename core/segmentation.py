@@ -91,6 +91,21 @@ def get_prediction(image_path: str, unet_weights: str) -> np.ndarray:
     return pred
 
 
+def segment_with_loaded_yolo(path_to_image: str, yolo_model: "YOLO") -> np.ndarray:
+    """Сегментация уже загруженной YOLO-моделью (без ре-инициализации)."""
+    results = yolo_model(path_to_image, retina_masks=True, save=False, verbose=False)
+    orig_img = results[0].orig_img
+    height, width = orig_img.shape[:2]
+    combined_mask = np.zeros((height, width), dtype=np.uint8)
+    if results[0].masks and results[0].masks.xy:
+        for mask in results[0].masks.xy:
+            mask_points = np.array(mask, dtype=np.int32)
+            instance_mask = np.zeros((height, width), dtype=np.uint8)
+            cv2.fillPoly(instance_mask, [mask_points], 255)
+            combined_mask = cv2.bitwise_or(combined_mask, instance_mask)
+    return combined_mask
+
+
 def main(
     path_to_image: str,
     yolo_weights: str = "/kaggle/input/weight-mask/weight/mask_builder_yolo.pt",
