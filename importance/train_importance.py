@@ -9,6 +9,7 @@
   - label_smoothing: сглаживание меток (уменьшает overfit на шумные метки)
 """
 
+import gc
 import json
 import random
 from pathlib import Path
@@ -280,9 +281,13 @@ def train_importance(
         print(f"preload_to_memory=True → forcing num_workers=0 (avoid fork-copy of cache)")
         num_workers = 0
 
+    # pin_memory с num_workers=0 в текущих версиях PyTorch может приводить
+    # к постепенной утечке хост-буферов (особенно с non_blocking=True).
+    # При воркерах=0 пиннинг почти не даёт прироста — отключаем.
+    pin_memory = num_workers > 0
     loader_kwargs = dict(
         num_workers=num_workers,
-        pin_memory=True,
+        pin_memory=pin_memory,
         collate_fn=_collate_fn,
         persistent_workers=(num_workers > 0),
     )
@@ -375,9 +380,10 @@ def train_importance(
 
         model.train()
         running_loss = 0.0
-        for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}", leave=False):
-            images = batch["image"].to(device, non_blocking=True)
-            targets = batch["target"].to(device, non_blocking=True)
+        non_blocking = pin_memory
+        for step, batch in enumerate(tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}", leave=False)):
+            images = batch["image"].to(device, non_blocking=non_blocking)
+            targets = batch["target"].to(device, non_blocking=non_blocking)
             idx = batch["idx"]
             if isinstance(idx, torch.Tensor):
                 w = train_weights[idx.to(device)].unsqueeze(1)
@@ -398,6 +404,13 @@ def train_importance(
             scaler.step(optimizer)
             scaler.update()
             running_loss += loss.item()
+
+            # Явно освобождаем ссылки на батч и периодически дёргаем GC,
+            # иначе мелкие numpy/PIL аллокации копятся и RAM растёт ~MB/батч.
+            del images, targets, logits, smooth_targets, loss_mat, loss, w, batch
+            if (step + 1) % 50 == 0:
+                gc.collect()
+        gc.collect()
         scheduler.step()
         train_loss = running_loss / len(train_loader)
 
@@ -407,17 +420,21 @@ def train_importance(
         all_targets = []
         with torch.no_grad():
             for batch in val_loader:
-                images = batch["image"].to(device, non_blocking=True)
-                targets = batch["target"].to(device, non_blocking=True)
+                images = batch["image"].to(device, non_blocking=non_blocking)
+                targets = batch["target"].to(device, non_blocking=non_blocking)
                 with torch.amp.autocast("cuda", enabled=amp_enabled):
                     logits = model(images)
                     loss = criterion(logits, targets).mean()
                 val_loss += loss.item()
-                all_logits.append(logits.float())
-                all_targets.append(targets)
+                # Сразу переносим на CPU, чтобы не держать GPU-тензоры до конца валидации
+                all_logits.append(logits.float().cpu())
+                all_targets.append(targets.cpu())
+                del images, targets, logits, loss, batch
         val_loss /= len(val_loader)
         logits_cat = torch.cat(all_logits, dim=0)
         targets_cat = torch.cat(all_targets, dim=0)
+        del all_logits, all_targets
+        gc.collect()
         prec10, rec10 = precision_recall_at_k_batch(logits_cat, targets_cat, k=10)
         score = (prec10 + rec10) / 2.0
 
