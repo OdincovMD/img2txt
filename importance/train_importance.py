@@ -9,10 +9,28 @@
   - label_smoothing: сглаживание меток (уменьшает overfit на шумные метки)
 """
 
+import ctypes
+import ctypes.util
 import gc
 import json
 import random
 from pathlib import Path
+
+# Принудительный возврат свободных страниц glibc обратно ОС.
+# Pillow/numpy аллоцируют через malloc(); glibc по умолчанию НЕ возвращает
+# страницы после free() — RSS монотонно растёт. malloc_trim(0) лечит это.
+try:
+    _libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6")
+    _libc.malloc_trim.argtypes = [ctypes.c_size_t]
+    _libc.malloc_trim.restype = ctypes.c_int
+    def _malloc_trim():
+        try:
+            _libc.malloc_trim(0)
+        except Exception:
+            pass
+except Exception:
+    def _malloc_trim():
+        pass
 from typing import Literal, Optional, Union
 
 import numpy as np
@@ -28,7 +46,7 @@ except ImportError:
     transforms = None
 
 from config.importance_config import LABEL_NAMES, NUM_LABELS
-from importance.importance_dataset import ImportanceDataset
+from importance.importance_dataset import ImportanceDataset, parse_expert_labels, build_target_vector
 from importance.importance_metrics import precision_recall_at_k_batch
 from importance.importance_model import ImportanceModel
 
@@ -150,6 +168,12 @@ def train_importance(
     use_mask: bool = False,
     freeze_backbone_epochs: int = 5,
     label_smoothing: float = 0.05,
+    use_pos_weight: bool = True,
+    pos_weight_cap: float = 10.0,
+    loss_type: Literal["bce", "focal"] = "bce",
+    focal_gamma: float = 2.0,
+    weight_decay: float = 1e-3,
+    dropout: float = 0.4,
     num_workers: int = 4,
     use_amp: bool = True,
     multi_gpu: bool = True,
@@ -308,11 +332,42 @@ def train_importance(
         num_labels=NUM_LABELS,
         pretrained=True,
         in_channels=in_channels,
-        dropout=0.3,
+        dropout=dropout,
     ).to(device)
 
-    # BCE без редукции — для взвешивания по примерам
-    criterion = nn.BCEWithLogitsLoss(reduction="none")
+    # ---- pos_weight по частоте меток (только из реальных train-примеров) ----
+    pos_weight_tensor = None
+    if use_pos_weight:
+        real_train_df = train_df[~train_df["_is_pseudo"]]
+        n_real_train = len(real_train_df)
+        if n_real_train > 0:
+            pos_counts = torch.zeros(NUM_LABELS, dtype=torch.float32)
+            for _, row in real_train_df.iterrows():
+                strs = parse_expert_labels(row, None)
+                t = build_target_vector(strs)
+                pos_counts += t
+            neg_counts = n_real_train - pos_counts
+            # классический pos_weight = neg / pos, с защитой от деления на 0
+            raw_pw = neg_counts / pos_counts.clamp(min=1.0)
+            pos_weight_tensor = raw_pw.clamp(max=pos_weight_cap).to(device)
+            print(f"pos_weight: min={pos_weight_tensor.min():.2f} "
+                  f"max={pos_weight_tensor.max():.2f} "
+                  f"mean={pos_weight_tensor.mean():.2f} (capped at {pos_weight_cap})")
+
+    if loss_type == "bce":
+        criterion = nn.BCEWithLogitsLoss(reduction="none", pos_weight=pos_weight_tensor)
+    elif loss_type == "focal":
+        # Multi-label focal loss с pos_weight
+        def criterion(logits, targets):
+            bce = nn.functional.binary_cross_entropy_with_logits(
+                logits, targets, reduction="none", pos_weight=pos_weight_tensor
+            )
+            p = torch.sigmoid(logits)
+            p_t = p * targets + (1 - p) * (1 - targets)
+            focal_w = (1 - p_t).pow(focal_gamma)
+            return focal_w * bce
+    else:
+        raise ValueError(f"Unknown loss_type: {loss_type}")
 
     # Два набора параметров: голова и бэкбон (разные lr)
     # NB: берём параметры ДО оборачивания в DataParallel
@@ -321,7 +376,7 @@ def train_importance(
     optimizer = torch.optim.AdamW([
         {"params": head_params, "lr": lr},
         {"params": backbone_params, "lr": lr * 0.1},
-    ], weight_decay=1e-4)
+    ], weight_decay=weight_decay)
 
     # Freeze backbone на первые freeze_backbone_epochs эпох
     def set_backbone_grad(requires_grad: bool):
@@ -410,7 +465,9 @@ def train_importance(
             del images, targets, logits, smooth_targets, loss_mat, loss, w, batch
             if (step + 1) % 50 == 0:
                 gc.collect()
+                _malloc_trim()
         gc.collect()
+        _malloc_trim()
         scheduler.step()
         train_loss = running_loss / len(train_loader)
 
@@ -435,6 +492,7 @@ def train_importance(
         targets_cat = torch.cat(all_targets, dim=0)
         del all_logits, all_targets
         gc.collect()
+        _malloc_trim()
         prec10, rec10 = precision_recall_at_k_batch(logits_cat, targets_cat, k=10)
         score = (prec10 + rec10) / 2.0
 
