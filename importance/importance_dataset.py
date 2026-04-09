@@ -155,9 +155,11 @@ class ImportanceDataset(Dataset):
                 image_id = row[self.image_id_col]
                 mask_path = self.mask_dir / f"{image_id}{self.mask_suffix}"
                 if mask_path.is_file():
-                    m = np.array(Image.open(mask_path).convert("L"))
-                    m = (m > 0).astype(np.uint8) * 255
-                    mask_cache[i] = self._resize_square(m[:, :, None])[:, :, 0] > 0
+                    m_pil = Image.open(mask_path).convert("L").resize(
+                        (self.preload_size, self.preload_size), Image.NEAREST
+                    )
+                    m = np.array(m_pil, dtype=np.uint8)
+                    mask_cache[i] = (m > 0).astype(np.uint8) * 255
                     has_mask[i] = True
 
         self._cache = cache
@@ -192,17 +194,21 @@ class ImportanceDataset(Dataset):
         if self._cache is not None:
             # Копия из contiguous-кэша — augmentation не должен модифицировать кэш
             image = self._cache[idx].copy()
-            if self.use_mask_channel and self._mask_cache is not None and self._has_mask[idx]:
-                mask = self._mask_cache[idx]
+            if self.use_mask_channel:
+                if self._mask_cache is not None and self._has_mask[idx]:
+                    mask = self._mask_cache[idx]
+                else:
+                    mask = np.zeros(image.shape[:2], dtype=np.uint8)
                 image = np.concatenate([image, mask[..., None]], axis=-1)
         else:
             image_path = self._resolve_image_path(row)
             image = self._load_image(image_path)
-            if self.use_mask_channel and self.mask_dir:
-                mask = self._load_mask(image_id)
-                if mask is not None:
-                    mask = np.expand_dims(mask, axis=-1)
-                    image = np.concatenate([image, mask], axis=-1)
+            if self.use_mask_channel:
+                mask = self._load_mask(image_id) if self.mask_dir else None
+                if mask is None:
+                    mask = np.zeros(image.shape[:2], dtype=np.uint8)
+                mask = np.expand_dims(mask, axis=-1)
+                image = np.concatenate([image, mask], axis=-1)
 
         expert_strings = parse_expert_labels(row, self.label_columns)
         target = build_target_vector(expert_strings)
