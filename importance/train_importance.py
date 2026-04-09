@@ -275,6 +275,11 @@ def train_importance(
         replacement=True,
     )
 
+    # При preload данные уже в RAM — воркеры не нужны и только дублируют кэш через fork-COW.
+    if preload_to_memory and num_workers > 0:
+        print(f"preload_to_memory=True → forcing num_workers=0 (avoid fork-copy of cache)")
+        num_workers = 0
+
     loader_kwargs = dict(
         num_workers=num_workers,
         pin_memory=True,

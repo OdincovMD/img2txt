@@ -128,48 +128,46 @@ class ImportanceDataset(Dataset):
             raise FileNotFoundError(f"Image not found: {image_path}")
         return image_path
 
-    def _resize_keep_aspect(self, img: np.ndarray) -> np.ndarray:
-        h, w = img.shape[:2]
-        if min(h, w) <= self.preload_size:
-            return img
-        if h < w:
-            new_h = self.preload_size
-            new_w = int(round(w * self.preload_size / h))
-        else:
-            new_w = self.preload_size
-            new_h = int(round(h * self.preload_size / w))
+    def _resize_square(self, img: np.ndarray) -> np.ndarray:
+        """Ресайз в квадрат preload_size × preload_size (без сохранения пропорций).
+        Аугментация при обучении делает RandomResizedCrop, так что точная пропорция не критична."""
         pil = Image.fromarray(img)
-        pil = pil.resize((new_w, new_h), Image.BILINEAR)
+        pil = pil.resize((self.preload_size, self.preload_size), Image.BILINEAR)
         return np.array(pil)
 
     def _preload(self):
         from tqdm import tqdm
-        cache = []
-        mask_cache = []
-        total_mb = 0.0
-        for i in tqdm(range(len(self.table)), desc="Preloading images"):
+        n = len(self.table)
+        # Один большой непрерывный массив — избегаем fork-copy миллионов мелких объектов
+        cache = np.empty((n, self.preload_size, self.preload_size, 3), dtype=np.uint8)
+        mask_cache = None
+        if self.use_mask_channel and self.mask_dir:
+            mask_cache = np.zeros((n, self.preload_size, self.preload_size), dtype=np.uint8)
+            has_mask = np.zeros(n, dtype=bool)
+
+        for i in tqdm(range(n), desc="Preloading images"):
             row = self.table.iloc[i]
             path = self._resolve_image_path(row)
             img = np.array(Image.open(path).convert("RGB"))
-            img = self._resize_keep_aspect(img)
-            cache.append(img)
-            total_mb += img.nbytes / 1e6
+            cache[i] = self._resize_square(img)
 
-            if self.use_mask_channel and self.mask_dir:
+            if mask_cache is not None:
                 image_id = row[self.image_id_col]
                 mask_path = self.mask_dir / f"{image_id}{self.mask_suffix}"
                 if mask_path.is_file():
                     m = np.array(Image.open(mask_path).convert("L"))
-                    m = (m > 0).astype(np.uint8)
-                    m = self._resize_keep_aspect(m[:, :, None])[:, :, 0]
-                    mask_cache.append(m)
-                else:
-                    mask_cache.append(None)
-            else:
-                mask_cache.append(None)
+                    m = (m > 0).astype(np.uint8) * 255
+                    mask_cache[i] = self._resize_square(m[:, :, None])[:, :, 0] > 0
+                    has_mask[i] = True
+
         self._cache = cache
         self._mask_cache = mask_cache
-        print(f"Preloaded {len(cache)} images ({total_mb:.1f} MB in RAM)")
+        if mask_cache is not None:
+            self._has_mask = has_mask
+        total_mb = cache.nbytes / 1e6
+        if mask_cache is not None:
+            total_mb += mask_cache.nbytes / 1e6
+        print(f"Preloaded {n} images as contiguous array ({total_mb:.1f} MB in RAM)")
 
     def __len__(self) -> int:
         return len(self.table)
@@ -192,11 +190,11 @@ class ImportanceDataset(Dataset):
         image_id = row[self.image_id_col]
 
         if self._cache is not None:
-            image = self._cache[idx]
-            if self.use_mask_channel:
+            # Копия из contiguous-кэша — augmentation не должен модифицировать кэш
+            image = self._cache[idx].copy()
+            if self.use_mask_channel and self._mask_cache is not None and self._has_mask[idx]:
                 mask = self._mask_cache[idx]
-                if mask is not None:
-                    image = np.concatenate([image, mask[..., None]], axis=-1)
+                image = np.concatenate([image, mask[..., None]], axis=-1)
         else:
             image_path = self._resolve_image_path(row)
             image = self._load_image(image_path)
