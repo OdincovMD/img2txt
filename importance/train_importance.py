@@ -155,6 +155,7 @@ def train_importance(
     *,
     pseudo_csv: Optional[Union[str, Path]] = None,
     pseudo_weight: float = 0.3,
+    pseudo_subsample: Optional[int] = None,
     mask_dir: Optional[Union[str, Path]] = None,
     image_col: str = "filename",
     image_id_col: str = "image_id",
@@ -214,6 +215,11 @@ def train_importance(
     if pseudo_csv is not None:
         df_pseudo = pd.read_csv(pseudo_csv)
         df_pseudo["_is_pseudo"] = True
+        if pseudo_subsample is not None and pseudo_subsample < len(df_pseudo):
+            df_pseudo = df_pseudo.sample(
+                n=pseudo_subsample, random_state=seed
+            ).reset_index(drop=True)
+            print(f"Pseudo subsampled to {len(df_pseudo)} rows (random_state={seed})")
         df_all = pd.concat([df_real, df_pseudo], ignore_index=True)
         print(f"Real: {len(df_real)}, Pseudo: {len(df_pseudo)}, Total: {len(df_all)}")
     else:
@@ -292,13 +298,29 @@ def train_importance(
         preload_size=preload_size,
     )
 
-    # WeightedRandomSampler: реальные примеры семплируются чаще
-    sampler_weights = [1.0 if not p else pseudo_weight for p in train_df["_is_pseudo"].tolist()]
+    # WeightedRandomSampler: подбираем веса так, чтобы реальные занимали
+    # фиксированную долю батча (real_fraction_in_batch), независимо от объёма псевдо.
+    # Это критично для маленьких real-выборок: иначе градиент тонет в псевдо.
+    n_real_train = int((~train_df["_is_pseudo"]).sum())
+    n_pseudo_train = int(train_df["_is_pseudo"].sum())
+    real_fraction_in_batch = 0.5  # 50/50 в батче
+    if n_pseudo_train > 0 and n_real_train > 0:
+        # Per-sample вес: для real ставим 1/n_real, для pseudo — так, чтобы
+        # суммарная вероятность псевдо-класса равнялась (1 - real_fraction)
+        w_real = real_fraction_in_batch / n_real_train
+        w_pseudo = (1.0 - real_fraction_in_batch) / n_pseudo_train
+        sampler_weights = [w_real if not p else w_pseudo for p in train_df["_is_pseudo"].tolist()]
+        # Размер эпохи — n_real * 4 (каждый реальный пример в среднем 2 раза за эпоху)
+        epoch_size = n_real_train * 4
+    else:
+        sampler_weights = [1.0] * len(train_df)
+        epoch_size = len(train_df)
     sampler = WeightedRandomSampler(
         weights=sampler_weights,
-        num_samples=len(train_ds),
+        num_samples=epoch_size,
         replacement=True,
     )
+    print(f"Sampler: epoch_size={epoch_size}, real_fraction_in_batch={real_fraction_in_batch}")
 
     # При preload данные уже в RAM — воркеры не нужны и только дублируют кэш через fork-COW.
     if preload_to_memory and num_workers > 0:
