@@ -469,7 +469,12 @@ def train_importance(
         # Размораживаем бэкбон после warmup
         if freeze_backbone_epochs > 0 and epoch == freeze_backbone_epochs:
             set_backbone_grad(True)
-            print(f"Epoch {epoch+1}: backbone unfrozen")
+            # Adam накопил нулевую статистику (m=0, v=0) для замороженных
+            # параметров — первые шаги после разморозки были бы нестабильными.
+            # Сбрасываем состояние, чтобы оптимизатор стартовал чисто.
+            for p in backbone_params:
+                optimizer.state.pop(p, None)
+            print(f"Epoch {epoch+1}: backbone unfrozen, Adam state reset for backbone")
 
         model.train()
         running_loss = 0.0
