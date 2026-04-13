@@ -4,11 +4,11 @@
 """
 
 from pathlib import Path
-from typing import List
+from typing import FrozenSet, List
 
-# Упорядоченный список ключей скалярных меток (без center_periphery и pigment_inclusions).
-# Совпадает с ключами в features_to_labels(), дающими строку.
-LABEL_NAMES: List[str] = [
+# Полный список всех скалярных меток, которые умеет вычислять features_to_labels().
+# Не удалять — используется как справочник и при необходимости полного режима.
+_ALL_LABEL_NAMES: List[str] = [
     "asymmetry",
     "borders",
     "contrast",
@@ -65,6 +65,39 @@ LABEL_NAMES: List[str] = [
     "percent_outlier_bright_pixels",
     "percent_outlier_dark_pixels",
 ]
+
+# Признаки, прошедшие порог частоты ≥10% по 400 аннотированным изображениям.
+# Только эти признаки попадают в labels / используются моделью.
+# При изменении порога или переразметке — обновить этот список.
+ACTIVE_LABELS: FrozenSet[str] = frozenset([
+    "asymmetry",           # 62.7%
+    "borders",             # 15.2%
+    "contrast",            # 32.2%
+    "palette",             # 16.2%
+    "texture",             # 10.8%
+    "elongation",          # 32.2%
+    "rim",                 # 22.5%
+    "color_homogeneity",   # 64.5%
+    "shape",               # 85.0%
+    "dominant_hue",        # 42.0%
+    "structure_order",     # 21.5%
+    "perimeter",           # 30.0%
+    "fractal_dimension",   # 45.8%
+    "eccentricity",        # 33.8%
+    "color_distance_euclidean",    # 85.8%
+    "delta_H_center_periphery",    # 36.0%
+    "delta_S_center_periphery",    # 39.2%
+    "delta_V_center_periphery",    # 24.2%
+    "delta_V_inner_rim",           # 56.5%
+    "delta_V_left_right",          # 18.5%
+    "delta_V_top_bottom",          # 29.2%
+    "delta_S_left_right",          # 37.5%
+    "std_H_lesion",                # 41.2%
+    "glcm_energy",                 # 13.8%
+])
+
+# Упорядоченный список активных меток — определяет порядок выходов модели.
+LABEL_NAMES: List[str] = [l for l in _ALL_LABEL_NAMES if l in ACTIVE_LABELS]
 
 NUM_LABELS = len(LABEL_NAMES)
 

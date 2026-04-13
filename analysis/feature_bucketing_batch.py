@@ -12,6 +12,7 @@ from tqdm import tqdm
 
 from analysis.threshold_rules import features_to_labels
 from config.config import FEATURE_ROUTING
+from config.importance_config import ACTIVE_LABELS
 
 
 def bucket_features_batch(
@@ -45,8 +46,11 @@ def bucket_features_batch(
         # Extract numeric features from row
         features_dict = _extract_numeric_features(row_dict)
 
-        # Apply threshold rules
-        labels = features_to_labels(features_dict)
+        # Apply threshold rules (вычисляются все признаки)
+        all_labels = features_to_labels(features_dict)
+
+        # Оставляем только признаки, прошедшие порог частоты
+        labels = {k: v for k, v in all_labels.items() if k in ACTIVE_LABELS}
 
         # Organize features into hierarchical structure
         features_organized = _organize_features_structure(features_dict)
