@@ -83,7 +83,12 @@ def set_seed(seed: int):
 def get_transform(image_size: int = 224, is_training: bool = True, in_channels: int = 3, aug_strength: str = "mild"):
     if transforms is None:
         raise ImportError("torchvision required for transforms.")
-    if aug_strength == "mild":
+    if aug_strength == "none":
+        is_training = False
+        crop_scale = (1.0, 1.0)
+        rot_deg = 0
+        cj_brightness, cj_contrast, cj_sat, cj_hue = 0.0, 0.0, 0.0, 0.0
+    elif aug_strength == "mild":
         crop_scale = (0.92, 1.0)
         rot_deg = 15
         cj_brightness, cj_contrast, cj_sat, cj_hue = 0.15, 0.15, 0.10, 0.0
@@ -178,7 +183,7 @@ def train_importance(
     label_smoothing: float = 0.05,
     use_pos_weight: bool = True,
     pos_weight_cap: float = 10.0,
-    aug_strength: Literal["mild", "strong"] = "mild",
+    aug_strength: Literal["none", "mild", "strong"] = "none",
     loss_type: Literal["bce", "focal"] = "bce",
     focal_gamma: float = 2.0,
     weight_decay: float = 1e-3,
