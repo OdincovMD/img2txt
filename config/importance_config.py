@@ -105,6 +105,12 @@ NUM_LABELS = len(LABEL_NAMES)
 LABEL_TO_IDX = {name: i for i, name in enumerate(LABEL_NAMES)}
 
 
+# Полный список сырых числовых ключей для векторного входа модели.
+# Используется как размерность табличного входа (55 признаков).
+FEAT_KEYS: List[str] = _ALL_LABEL_NAMES
+FEAT_DIM: int = len(FEAT_KEYS)
+
+
 def expert_string_to_label_key(s: str) -> str:
     """
     Из строки разметки эксперта "признак:значение" извлекает ключ признака.

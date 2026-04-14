@@ -1,5 +1,10 @@
 """
-Модель отбора важных признаков: предобученный backbone (EfficientNet/ResNet) + голова с N выходами (sigmoid).
+Модель отбора важных признаков: предобученный backbone (EfficientNet/ResNet) +
+ветка табличных признаков + голова с N выходами (sigmoid).
+
+Вход:
+  x        — тензор изображения (B, C, H, W), C=3 или 4
+  features — нормализованный вектор числовых признаков (B, FEAT_DIM)
 """
 
 from typing import Optional
@@ -7,7 +12,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-from config.importance_config import NUM_LABELS
+from config.importance_config import NUM_LABELS, FEAT_DIM
 
 try:
     import torchvision.models as tv_models
@@ -84,8 +89,10 @@ def get_backbone(name: str = "efficientnet_b0", pretrained: bool = True, in_chan
 
 class ImportanceModel(nn.Module):
     """
-    Backbone (CNN) + линейная голова с num_labels выходами.
-    Логиты для BCEWithLogitsLoss; при инференсе после sigmoid берём топ-10.
+    Backbone (CNN) + ветка табличных признаков + голова с num_labels выходами.
+
+    forward(x, features) → логиты (B, num_labels).
+    При инференсе после sigmoid берём топ-k.
     """
 
     def __init__(
@@ -95,15 +102,24 @@ class ImportanceModel(nn.Module):
         pretrained: bool = True,
         in_channels: int = 3,
         dropout: float = 0.2,
+        feat_input_dim: int = FEAT_DIM,
     ):
         super().__init__()
         self.backbone, feat_dim = get_backbone(backbone_name, pretrained=pretrained, in_channels=in_channels)
+        # Ветка для табличных признаков
+        self.feature_branch = nn.Sequential(
+            nn.Linear(feat_input_dim, 64),
+            nn.ReLU(),
+        )
         self.head = nn.Sequential(
             nn.Dropout(p=dropout),
-            nn.Linear(feat_dim, num_labels),
+            nn.Linear(feat_dim + 64, num_labels),
         )
         self.num_labels = num_labels
+        self.feat_input_dim = feat_input_dim
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        features = self.backbone(x)
-        return self.head(features)
+    def forward(self, x: torch.Tensor, features: torch.Tensor) -> torch.Tensor:
+        img_feat = self.backbone(x)
+        tab_feat = self.feature_branch(features)
+        combined = torch.cat([img_feat, tab_feat], dim=1)
+        return self.head(combined)

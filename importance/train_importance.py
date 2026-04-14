@@ -2,9 +2,7 @@
 Обучение модели отбора важных признаков.
 Запуск: train_importance(data_csv=..., image_dir=...) из ноутбука или скрипта.
 
-Поддерживает смешивание реальной разметки (500+) с псевдо-разметкой:
-  - pseudo_csv: CSV с псевдо-метками (те же колонки, что и data_csv)
-  - pseudo_weight: вес псевдо-примеров в функции потерь (по умолчанию 0.3)
+Поддерживает:
   - freeze_backbone_epochs: сколько эпох обучать только голову (warmup)
   - label_smoothing: сглаживание меток (уменьшает overfit на шумные метки)
 """
@@ -16,9 +14,6 @@ import json
 import random
 from pathlib import Path
 
-# Принудительный возврат свободных страниц glibc обратно ОС.
-# Pillow/numpy аллоцируют через malloc(); glibc по умолчанию НЕ возвращает
-# страницы после free() — RSS монотонно растёт. malloc_trim(0) лечит это.
 try:
     _libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6")
     _libc.malloc_trim.argtypes = [ctypes.c_size_t]
@@ -31,13 +26,14 @@ try:
 except Exception:
     def _malloc_trim():
         pass
+
 from typing import Literal, Optional, Union
 
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, WeightedRandomSampler, default_collate
+from torch.utils.data import DataLoader, default_collate
 from tqdm import tqdm
 
 try:
@@ -45,7 +41,8 @@ try:
 except ImportError:
     transforms = None
 
-from config.importance_config import LABEL_NAMES, NUM_LABELS
+from analysis.threshold_rules import parse_features_json
+from config.importance_config import FEAT_KEYS, LABEL_NAMES, NUM_LABELS
 from importance.importance_dataset import ImportanceDataset, parse_expert_labels, build_target_vector
 from importance.importance_metrics import precision_recall_at_k_batch
 from importance.importance_model import ImportanceModel
@@ -60,7 +57,6 @@ def _collate_fn(batch):
     result = {}
     for key in batch[0]:
         vals = [b[key] for b in batch]
-        # Для строковых полей сразу пропускаем default_collate
         if any(isinstance(v, str) for v in vals):
             result[key] = vals
             continue
@@ -82,9 +78,6 @@ def set_seed(seed: int):
 def get_transform(image_size: int = 224, is_training: bool = True, in_channels: int = 3, aug_strength: str = "mild"):
     if transforms is None:
         raise ImportError("torchvision required for transforms.")
-    # Параметры аугментации по силе
-    # mild: безопасно для дерматоскопии (не трогает цвет, не режет границы)
-    # strong: исходный агрессивный вариант
     if aug_strength == "mild":
         crop_scale = (0.92, 1.0)
         rot_deg = 15
@@ -129,7 +122,6 @@ def get_transform(image_size: int = 224, is_training: bool = True, in_channels: 
         mask_pil = PILImage.fromarray(mask)
 
         if is_training:
-            # Spatial transforms — применяем одинаково к RGB и маске
             if random.random() > 0.5:
                 rgb_pil = rgb_pil.transpose(PILImage.FLIP_LEFT_RIGHT)
                 mask_pil = mask_pil.transpose(PILImage.FLIP_LEFT_RIGHT)
@@ -139,7 +131,6 @@ def get_transform(image_size: int = 224, is_training: bool = True, in_channels: 
             angle = random.uniform(-30, 30)
             rgb_pil = rgb_pil.rotate(angle, resample=PILImage.BILINEAR)
             mask_pil = mask_pil.rotate(angle, resample=PILImage.NEAREST)
-            # ColorJitter только для RGB
             rgb_pil = transforms.ColorJitter(
                 brightness=0.3, contrast=0.3, saturation=0.2, hue=0.05
             )(rgb_pil)
@@ -163,16 +154,43 @@ def _smooth_targets(targets: torch.Tensor, smoothing: float) -> torch.Tensor:
     return targets * (1.0 - smoothing) + smoothing * 0.5
 
 
+def compute_feat_stats(df: pd.DataFrame, features_col: str = "features_json") -> tuple:
+    """
+    Вычисляет mean и std для каждого ключа FEAT_KEYS по строкам df.
+    Возвращает (feat_mean, feat_std) — словари {key: float}.
+    """
+    accum = {k: [] for k in FEAT_KEYS}
+    for _, row in df.iterrows():
+        raw = row.get(features_col)
+        if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+            continue
+        feats = parse_features_json(raw)
+        for k in FEAT_KEYS:
+            v = feats.get(k)
+            if isinstance(v, (int, float)) and not (isinstance(v, float) and np.isnan(v)) and np.isfinite(v):
+                accum[k].append(float(v))
+
+    feat_mean = {}
+    feat_std = {}
+    for k in FEAT_KEYS:
+        vals = accum[k]
+        if vals:
+            feat_mean[k] = float(np.mean(vals))
+            feat_std[k] = max(float(np.std(vals)), 1e-6)
+        else:
+            feat_mean[k] = 0.0
+            feat_std[k] = 1.0
+    return feat_mean, feat_std
+
+
 def train_importance(
     data_csv: Union[str, Path],
     image_dir: Union[str, Path],
     *,
-    pseudo_csv: Optional[Union[str, Path]] = None,
-    pseudo_weight: float = 0.3,
-    pseudo_subsample: Optional[int] = None,
     mask_dir: Optional[Union[str, Path]] = None,
     image_col: str = "filename",
     image_id_col: str = "image_id",
+    features_col: str = "features_json",
     val_ratio: float = 0.15,
     splits_file: Optional[Union[str, Path]] = None,
     backbone: BackboneName = "efficientnet_b0",
@@ -202,10 +220,10 @@ def train_importance(
     Обучает модель; сохраняет лучший чекпоинт в ``out_dir / best.pt``.
 
     Args:
-        data_csv: CSV с реальной разметкой (колонки: image_id, filename, important_labels).
+        data_csv: CSV с реальной разметкой (колонки: image_id, filename,
+                  important_labels, features_json).
         image_dir: Корень директории с изображениями.
-        pseudo_csv: CSV с псевдо-разметкой (те же колонки). Будет смешан с data_csv.
-        pseudo_weight: Вес псевдо-примеров в функции потерь (0..1). Реальные всегда 1.0.
+        features_col: Колонка с JSON признаков (шаг 1 пайплайна).
         freeze_backbone_epochs: Число эпох warmup с замороженным бэкбоном.
         label_smoothing: Сглаживание меток (0.0 = выкл, 0.05–0.1 рекомендуется).
         epochs: Полное число эпох (включая freeze_backbone_epochs).
@@ -223,67 +241,40 @@ def train_importance(
     image_dir = str(image_dir)
     mask_dir_s = str(mask_dir) if mask_dir is not None else None
 
-    # ---- Загрузка данных ----
-    df_real = pd.read_csv(data_csv)
-    df_real["_is_pseudo"] = False
+    # ---- Загрузка и разбивка данных ----
+    df = pd.read_csv(data_csv)
+    print(f"Loaded {len(df)} samples from {data_csv}")
 
-    if pseudo_csv is not None:
-        df_pseudo = pd.read_csv(pseudo_csv)
-        df_pseudo["_is_pseudo"] = True
-        if pseudo_subsample is not None and pseudo_subsample < len(df_pseudo):
-            df_pseudo = df_pseudo.sample(
-                n=pseudo_subsample, random_state=seed
-            ).reset_index(drop=True)
-            print(f"Pseudo subsampled to {len(df_pseudo)} rows (random_state={seed})")
-        df_all = pd.concat([df_real, df_pseudo], ignore_index=True)
-        print(f"Real: {len(df_real)}, Pseudo: {len(df_pseudo)}, Total: {len(df_all)}")
-    else:
-        df_all = df_real.copy()
-        print(f"Real: {len(df_real)} (no pseudo-labels)")
-
-    # Нормализуем имена колонок
-    if image_id_col not in df_all.columns and "image_id" in df_all.columns:
+    if image_id_col not in df.columns and "image_id" in df.columns:
         image_id_col = "image_id"
-    if image_col not in df_all.columns and "filename" in df_all.columns:
+    if image_col not in df.columns and "filename" in df.columns:
         image_col = "filename"
-
-    # Валидация — только из реальной разметки
-    real_mask = ~df_all["_is_pseudo"]
-    df_real_only = df_all[real_mask].copy()
 
     if splits_file and Path(splits_file).is_file():
         with open(splits_file) as f:
             splits = json.load(f)
         if "train_idx" in splits:
-            val_real_ids = set(df_real_only.iloc[splits["val_idx"]][image_id_col].tolist())
+            val_ids = set(df.iloc[splits["val_idx"]][image_id_col].tolist())
         else:
-            val_real_ids = set(splits.get("val", []))
+            val_ids = set(splits.get("val", []))
     else:
-        n_real = len(df_real_only)
-        n_val = max(1, int(n_real * val_ratio))
+        n_val = max(1, int(len(df) * val_ratio))
         rng = np.random.RandomState(seed)
-        perm = rng.permutation(n_real)
-        val_ids_local = perm[:n_val]
-        val_real_ids = set(df_real_only.iloc[val_ids_local][image_id_col].tolist())
-        splits = {
-            "val_ids": list(val_real_ids),
-            "note": "val is always from real-labeled data only",
-        }
+        perm = rng.permutation(len(df))
+        val_ids = set(df.iloc[perm[:n_val]][image_id_col].tolist())
+        splits = {"val_ids": list(val_ids)}
         with open(out_dir / "splits.json", "w") as f:
             json.dump(splits, f, indent=2)
 
-    val_mask = df_all[image_id_col].isin(val_real_ids)
-    val_df = df_all[val_mask & real_mask].copy()
-    train_df = df_all[~val_mask].copy()
+    val_mask = df[image_id_col].isin(val_ids)
+    val_df = df[val_mask].copy()
+    train_df = df[~val_mask].copy()
+    print(f"Train: {len(train_df)}, Val: {len(val_df)}")
 
-    print(f"Train: {len(train_df)} ({(~train_df['_is_pseudo']).sum()} real + {train_df['_is_pseudo'].sum()} pseudo)")
-    print(f"Val:   {len(val_df)} (real only)")
-
-    # Веса для взвешенной функции потерь
-    train_weights = torch.tensor(
-        [pseudo_weight if p else 1.0 for p in train_df["_is_pseudo"].tolist()],
-        dtype=torch.float32,
-    )
+    # ---- Статистики нормализации признаков (только по train) ----
+    feat_mean, feat_std = compute_feat_stats(train_df, features_col=features_col)
+    print(f"Feature stats computed from {len(train_df)} train samples "
+          f"({sum(1 for v in feat_mean.values() if v != 0.0)} non-zero means)")
 
     # ---- Трансформы ----
     in_channels = 4 if use_mask else 3
@@ -291,61 +282,24 @@ def train_importance(
     transform_val = get_transform(image_size, is_training=False, in_channels=in_channels, aug_strength=aug_strength)
     print(f"Augmentation: {aug_strength}")
 
-    train_ds = ImportanceDataset(
-        train_df,
-        image_dir=image_dir,
+    ds_kwargs = dict(
         image_col=image_col,
         image_id_col=image_id_col,
+        features_col=features_col,
+        feat_mean=feat_mean,
+        feat_std=feat_std,
         mask_dir=mask_dir_s,
-        transform=transform_train,
         use_mask_channel=use_mask,
         preload_to_memory=preload_to_memory,
         preload_size=preload_size,
     )
-    val_ds = ImportanceDataset(
-        val_df,
-        image_dir=image_dir,
-        image_col=image_col,
-        image_id_col=image_id_col,
-        mask_dir=mask_dir_s,
-        transform=transform_val,
-        use_mask_channel=use_mask,
-        preload_to_memory=preload_to_memory,
-        preload_size=preload_size,
-    )
+    train_ds = ImportanceDataset(train_df, image_dir=image_dir, transform=transform_train, **ds_kwargs)
+    val_ds = ImportanceDataset(val_df, image_dir=image_dir, transform=transform_val, **ds_kwargs)
 
-    # WeightedRandomSampler: подбираем веса так, чтобы реальные занимали
-    # фиксированную долю батча (real_fraction_in_batch), независимо от объёма псевдо.
-    # Это критично для маленьких real-выборок: иначе градиент тонет в псевдо.
-    n_real_train = int((~train_df["_is_pseudo"]).sum())
-    n_pseudo_train = int(train_df["_is_pseudo"].sum())
-    real_fraction_in_batch = 0.5  # 50/50 в батче
-    if n_pseudo_train > 0 and n_real_train > 0:
-        # Per-sample вес: для real ставим 1/n_real, для pseudo — так, чтобы
-        # суммарная вероятность псевдо-класса равнялась (1 - real_fraction)
-        w_real = real_fraction_in_batch / n_real_train
-        w_pseudo = (1.0 - real_fraction_in_batch) / n_pseudo_train
-        sampler_weights = [w_real if not p else w_pseudo for p in train_df["_is_pseudo"].tolist()]
-        # Размер эпохи — n_real * 4 (каждый реальный пример в среднем 2 раза за эпоху)
-        epoch_size = n_real_train * 4
-    else:
-        sampler_weights = [1.0] * len(train_df)
-        epoch_size = len(train_df)
-    sampler = WeightedRandomSampler(
-        weights=sampler_weights,
-        num_samples=epoch_size,
-        replacement=True,
-    )
-    print(f"Sampler: epoch_size={epoch_size}, real_fraction_in_batch={real_fraction_in_batch}")
-
-    # При preload данные уже в RAM — воркеры не нужны и только дублируют кэш через fork-COW.
     if preload_to_memory and num_workers > 0:
-        print(f"preload_to_memory=True → forcing num_workers=0 (avoid fork-copy of cache)")
+        print("preload_to_memory=True → forcing num_workers=0")
         num_workers = 0
 
-    # pin_memory с num_workers=0 в текущих версиях PyTorch может приводить
-    # к постепенной утечке хост-буферов (особенно с non_blocking=True).
-    # При воркерах=0 пиннинг почти не даёт прироста — отключаем.
     pin_memory = num_workers > 0
     loader_kwargs = dict(
         num_workers=num_workers,
@@ -356,12 +310,8 @@ def train_importance(
     if num_workers > 0:
         loader_kwargs["prefetch_factor"] = 4
 
-    train_loader = DataLoader(
-        train_ds, batch_size=batch_size, sampler=sampler, **loader_kwargs,
-    )
-    val_loader = DataLoader(
-        val_ds, batch_size=batch_size, shuffle=False, **loader_kwargs,
-    )
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, **loader_kwargs)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, **loader_kwargs)
 
     # ---- Модель ----
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -373,19 +323,17 @@ def train_importance(
         dropout=dropout,
     ).to(device)
 
-    # ---- pos_weight по частоте меток (только из реальных train-примеров) ----
+    # ---- pos_weight по частоте меток в train ----
     pos_weight_tensor = None
     if use_pos_weight:
-        real_train_df = train_df[~train_df["_is_pseudo"]]
-        n_real_train = len(real_train_df)
-        if n_real_train > 0:
+        n = len(train_df)
+        if n > 0:
             pos_counts = torch.zeros(NUM_LABELS, dtype=torch.float32)
-            for _, row in real_train_df.iterrows():
+            for _, row in train_df.iterrows():
                 strs = parse_expert_labels(row, None)
                 t = build_target_vector(strs)
                 pos_counts += t
-            neg_counts = n_real_train - pos_counts
-            # классический pos_weight = neg / pos, с защитой от деления на 0
+            neg_counts = n - pos_counts
             raw_pw = neg_counts / pos_counts.clamp(min=1.0)
             pos_weight_tensor = raw_pw.clamp(max=pos_weight_cap).to(device)
             print(f"pos_weight: min={pos_weight_tensor.min():.2f} "
@@ -395,7 +343,6 @@ def train_importance(
     if loss_type == "bce":
         criterion = nn.BCEWithLogitsLoss(reduction="none", pos_weight=pos_weight_tensor)
     elif loss_type == "focal":
-        # Multi-label focal loss с pos_weight
         def criterion(logits, targets):
             bce = nn.functional.binary_cross_entropy_with_logits(
                 logits, targets, reduction="none", pos_weight=pos_weight_tensor
@@ -407,16 +354,13 @@ def train_importance(
     else:
         raise ValueError(f"Unknown loss_type: {loss_type}")
 
-    # Два набора параметров: голова и бэкбон (разные lr)
-    # NB: берём параметры ДО оборачивания в DataParallel
-    head_params = list(model.head.parameters())
+    head_params = list(model.head.parameters()) + list(model.feature_branch.parameters())
     backbone_params = list(model.backbone.parameters())
     optimizer = torch.optim.AdamW([
         {"params": head_params, "lr": lr},
         {"params": backbone_params, "lr": lr * 0.1},
     ], weight_decay=weight_decay)
 
-    # Freeze backbone на первые freeze_backbone_epochs эпох
     def set_backbone_grad(requires_grad: bool):
         for p in backbone_params:
             p.requires_grad = requires_grad
@@ -427,29 +371,22 @@ def train_importance(
 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
 
-    train_weights = train_weights.to(device)
-
-    # Multi-GPU: оборачиваем в DataParallel ПОСЛЕ создания optimizer
     n_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
     if multi_gpu and n_gpus > 1:
         model = nn.DataParallel(model)
         print(f"Using DataParallel on {n_gpus} GPUs")
     else:
-        print(f"Using single device: {device} (n_gpus={n_gpus})")
+        print(f"Using single device: {device}")
 
-    # AMP (mixed precision) — сильно ускоряет на T4/V100/A100
     amp_enabled = use_amp and device.type == "cuda"
     scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
     if amp_enabled:
         print("Mixed precision (AMP) enabled")
 
-    # cudnn autotuner — ускоряет свёртки при фиксированном input size
     torch.backends.cudnn.benchmark = True
 
     run_config = {
         "data_csv": str(data_csv.resolve()),
-        "pseudo_csv": str(pseudo_csv) if pseudo_csv else None,
-        "pseudo_weight": pseudo_weight,
         "image_dir": image_dir,
         "mask_dir": mask_dir_s,
         "backbone": backbone,
@@ -465,36 +402,28 @@ def train_importance(
     }
 
     best_score = 0.0
+    non_blocking = pin_memory
+
     for epoch in range(epochs):
-        # Размораживаем бэкбон после warmup
         if freeze_backbone_epochs > 0 and epoch == freeze_backbone_epochs:
             set_backbone_grad(True)
-            # Adam накопил нулевую статистику (m=0, v=0) для замороженных
-            # параметров — первые шаги после разморозки были бы нестабильными.
-            # Сбрасываем состояние, чтобы оптимизатор стартовал чисто.
             for p in backbone_params:
                 optimizer.state.pop(p, None)
-            print(f"Epoch {epoch+1}: backbone unfrozen, Adam state reset for backbone")
+            print(f"Epoch {epoch+1}: backbone unfrozen, Adam state reset")
 
         model.train()
         running_loss = 0.0
-        non_blocking = pin_memory
         for step, batch in enumerate(tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}", leave=False)):
             images = batch["image"].to(device, non_blocking=non_blocking)
+            feats = batch["features"].to(device, non_blocking=non_blocking)
             targets = batch["target"].to(device, non_blocking=non_blocking)
-            idx = batch["idx"]
-            if isinstance(idx, torch.Tensor):
-                w = train_weights[idx.to(device)].unsqueeze(1)
-            else:
-                w = train_weights[torch.as_tensor(idx, device=device)].unsqueeze(1)
 
             optimizer.zero_grad(set_to_none=True)
 
             with torch.amp.autocast("cuda", enabled=amp_enabled):
-                logits = model(images)
+                logits = model(images, feats)
                 smooth_targets = _smooth_targets(targets, label_smoothing)
-                loss_mat = criterion(logits, smooth_targets)
-                loss = (loss_mat * w).mean()
+                loss = criterion(logits, smooth_targets).mean()
 
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
@@ -503,12 +432,11 @@ def train_importance(
             scaler.update()
             running_loss += loss.item()
 
-            # Явно освобождаем ссылки на батч и периодически дёргаем GC,
-            # иначе мелкие numpy/PIL аллокации копятся и RAM растёт ~MB/батч.
-            del images, targets, logits, smooth_targets, loss_mat, loss, w, batch
+            del images, feats, targets, logits, smooth_targets, loss, batch
             if (step + 1) % 50 == 0:
                 gc.collect()
                 _malloc_trim()
+
         gc.collect()
         _malloc_trim()
         scheduler.step()
@@ -521,21 +449,23 @@ def train_importance(
         with torch.no_grad():
             for batch in val_loader:
                 images = batch["image"].to(device, non_blocking=non_blocking)
+                feats = batch["features"].to(device, non_blocking=non_blocking)
                 targets = batch["target"].to(device, non_blocking=non_blocking)
                 with torch.amp.autocast("cuda", enabled=amp_enabled):
-                    logits = model(images)
+                    logits = model(images, feats)
                     loss = criterion(logits, targets).mean()
                 val_loss += loss.item()
-                # Сразу переносим на CPU, чтобы не держать GPU-тензоры до конца валидации
                 all_logits.append(logits.float().cpu())
                 all_targets.append(targets.cpu())
-                del images, targets, logits, loss, batch
+                del images, feats, targets, logits, loss, batch
+
         val_loss /= len(val_loader)
         logits_cat = torch.cat(all_logits, dim=0)
         targets_cat = torch.cat(all_targets, dim=0)
         del all_logits, all_targets
         gc.collect()
         _malloc_trim()
+
         prec10, rec10 = precision_recall_at_k_batch(logits_cat, targets_cat, k=10)
         score = (prec10 + rec10) / 2.0
 
@@ -548,7 +478,6 @@ def train_importance(
 
         if score > best_score:
             best_score = score
-            # Разворачиваем DataParallel перед сохранением
             state_dict = model.module.state_dict() if isinstance(model, nn.DataParallel) else model.state_dict()
             ckpt = {
                 "epoch": epoch + 1,
@@ -559,6 +488,7 @@ def train_importance(
                 "rec10": rec10,
                 "args": run_config,
                 "label_names": LABEL_NAMES,
+                "feat_stats": {"mean": feat_mean, "std": feat_std},
             }
             torch.save(ckpt, out_dir / "best.pt")
             print(f"  -> saved best.pt (score={score:.4f})")
