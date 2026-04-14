@@ -161,7 +161,7 @@ def _predict_from_row(
     labels_dict = row_to_labels(row.to_dict())
 
     feat_vector = extract_feat_vector(
-        row.get("features_json"),
+        row.to_dict(),
         feat_mean=getattr(model, "feat_mean", {}),
         feat_std=getattr(model, "feat_std", {}),
     )

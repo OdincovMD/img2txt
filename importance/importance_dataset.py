@@ -13,7 +13,6 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
-from analysis.threshold_rules import parse_features_json
 from config.importance_config import FEAT_KEYS, LABEL_NAMES, LABEL_TO_IDX, expert_string_to_label_key
 
 
@@ -70,19 +69,18 @@ def build_target_vector(expert_label_strings: List[str]) -> torch.Tensor:
 
 
 def extract_feat_vector(
-    features_json_raw,
+    row_dict: dict,
     feat_mean: Dict[str, float],
     feat_std: Dict[str, float],
 ) -> torch.Tensor:
     """
-    Из сырого features_json строит нормализованный вектор длины FEAT_DIM.
-    Ключи — FEAT_KEYS (все 55 числовых признаков).
-    Отсутствующие или нечисловые значения → 0.0 (после нормализации = среднее).
+    Из плоского словаря строки датафрейма строит нормализованный вектор длины FEAT_DIM.
+    Ключи — FEAT_KEYS (49 сырых числовых признаков из pipeline-колонок).
+    Отсутствующие или нечисловые значения → 0.0 (= среднее после нормализации).
     """
-    feats = parse_features_json(features_json_raw) if features_json_raw is not None else {}
     vec = []
     for k in FEAT_KEYS:
-        v = feats.get(k)
+        v = row_dict.get(k)
         if isinstance(v, (int, float)) and not (isinstance(v, float) and np.isnan(v)) and np.isfinite(v):
             normalized = (float(v) - feat_mean.get(k, 0.0)) / feat_std.get(k, 1.0)
         else:
@@ -103,7 +101,6 @@ class ImportanceDataset(Dataset):
         image_dir: Union[str, Path],
         image_col: str = "filename",
         image_id_col: str = "image_id",
-        features_col: str = "features_json",
         feat_mean: Optional[Dict[str, float]] = None,
         feat_std: Optional[Dict[str, float]] = None,
         mask_dir: Optional[Union[str, Path]] = None,
@@ -119,7 +116,6 @@ class ImportanceDataset(Dataset):
         image_dir: корень директории с изображениями.
         image_col: имя колонки с именем файла.
         image_id_col: имя колонки с id изображения.
-        features_col: имя колонки с features_json (шаг 1 пайплайна).
         feat_mean / feat_std: статистики нормализации, вычисленные по train-выборке.
         mask_dir: если задано, маска ищется в mask_dir / (image_id + mask_suffix).
         label_columns: список колонок с метками эксперта.
@@ -130,7 +126,6 @@ class ImportanceDataset(Dataset):
         self.image_dir = Path(image_dir)
         self.image_col = image_col
         self.image_id_col = image_id_col
-        self.features_col = features_col
         self.feat_mean = feat_mean or {}
         self.feat_std = feat_std or {}
         self.mask_dir = Path(mask_dir) if mask_dir else None
@@ -227,11 +222,7 @@ class ImportanceDataset(Dataset):
                     mask = np.zeros(image.shape[:2], dtype=np.uint8)
                 image = np.concatenate([image, mask[..., None]], axis=-1)
 
-        features = extract_feat_vector(
-            row.get(self.features_col),
-            self.feat_mean,
-            self.feat_std,
-        )
+        features = extract_feat_vector(row.to_dict(), self.feat_mean, self.feat_std)
 
         expert_strings = parse_expert_labels(row, self.label_columns)
         target = build_target_vector(expert_strings)

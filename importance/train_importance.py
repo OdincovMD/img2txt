@@ -41,7 +41,6 @@ try:
 except ImportError:
     transforms = None
 
-from analysis.threshold_rules import parse_features_json
 from config.importance_config import FEAT_KEYS, LABEL_NAMES, NUM_LABELS
 from importance.importance_dataset import ImportanceDataset, parse_expert_labels, build_target_vector
 from importance.importance_metrics import precision_recall_at_k_batch
@@ -154,21 +153,18 @@ def _smooth_targets(targets: torch.Tensor, smoothing: float) -> torch.Tensor:
     return targets * (1.0 - smoothing) + smoothing * 0.5
 
 
-def compute_feat_stats(df: pd.DataFrame, features_col: str = "features_json") -> tuple:
+def compute_feat_stats(df: pd.DataFrame) -> tuple:
     """
-    Вычисляет mean и std для каждого ключа FEAT_KEYS по строкам df.
+    Вычисляет mean и std для каждого ключа FEAT_KEYS по плоским колонкам df.
     Возвращает (feat_mean, feat_std) — словари {key: float}.
     """
     accum = {k: [] for k in FEAT_KEYS}
-    for _, row in df.iterrows():
-        raw = row.get(features_col)
-        if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+    for k in FEAT_KEYS:
+        if k not in df.columns:
             continue
-        feats = parse_features_json(raw)
-        for k in FEAT_KEYS:
-            v = feats.get(k)
-            if isinstance(v, (int, float)) and not (isinstance(v, float) and np.isnan(v)) and np.isfinite(v):
-                accum[k].append(float(v))
+        vals = pd.to_numeric(df[k], errors="coerce").dropna()
+        vals = vals[np.isfinite(vals)]
+        accum[k] = vals.tolist()
 
     feat_mean = {}
     feat_std = {}
@@ -190,7 +186,6 @@ def train_importance(
     mask_dir: Optional[Union[str, Path]] = None,
     image_col: str = "filename",
     image_id_col: str = "image_id",
-    features_col: str = "features_json",
     val_ratio: float = 0.15,
     splits_file: Optional[Union[str, Path]] = None,
     backbone: BackboneName = "efficientnet_b0",
@@ -223,7 +218,6 @@ def train_importance(
         data_csv: CSV с реальной разметкой (колонки: image_id, filename,
                   important_labels, features_json).
         image_dir: Корень директории с изображениями.
-        features_col: Колонка с JSON признаков (шаг 1 пайплайна).
         freeze_backbone_epochs: Число эпох warmup с замороженным бэкбоном.
         label_smoothing: Сглаживание меток (0.0 = выкл, 0.05–0.1 рекомендуется).
         epochs: Полное число эпох (включая freeze_backbone_epochs).
@@ -272,7 +266,7 @@ def train_importance(
     print(f"Train: {len(train_df)}, Val: {len(val_df)}")
 
     # ---- Статистики нормализации признаков (только по train) ----
-    feat_mean, feat_std = compute_feat_stats(train_df, features_col=features_col)
+    feat_mean, feat_std = compute_feat_stats(train_df)
     print(f"Feature stats computed from {len(train_df)} train samples "
           f"({sum(1 for v in feat_mean.values() if v != 0.0)} non-zero means)")
 
@@ -285,7 +279,6 @@ def train_importance(
     ds_kwargs = dict(
         image_col=image_col,
         image_id_col=image_id_col,
-        features_col=features_col,
         feat_mean=feat_mean,
         feat_std=feat_std,
         mask_dir=mask_dir_s,
