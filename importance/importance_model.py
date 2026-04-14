@@ -12,7 +12,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-from config.importance_config import NUM_LABELS, FEAT_DIM
+from config.importance_config import NUM_LABELS
 
 try:
     import torchvision.models as tv_models
@@ -102,24 +102,28 @@ class ImportanceModel(nn.Module):
         pretrained: bool = True,
         in_channels: int = 3,
         dropout: float = 0.2,
-        feat_input_dim: int = FEAT_DIM,
+        feat_input_dim: int = 0,
     ):
         super().__init__()
         self.backbone, feat_dim = get_backbone(backbone_name, pretrained=pretrained, in_channels=in_channels)
-        # Ветка для табличных признаков
-        self.feature_branch = nn.Sequential(
-            nn.Linear(feat_input_dim, 64),
-            nn.ReLU(),
-        )
+        tab_hidden = 64 if feat_input_dim > 0 else 0
+        if feat_input_dim > 0:
+            self.feature_branch = nn.Sequential(
+                nn.Linear(feat_input_dim, tab_hidden),
+                nn.ReLU(),
+            )
+        else:
+            self.feature_branch = None
         self.head = nn.Sequential(
             nn.Dropout(p=dropout),
-            nn.Linear(feat_dim + 64, num_labels),
+            nn.Linear(feat_dim + tab_hidden, num_labels),
         )
         self.num_labels = num_labels
         self.feat_input_dim = feat_input_dim
 
     def forward(self, x: torch.Tensor, features: torch.Tensor) -> torch.Tensor:
         img_feat = self.backbone(x)
+        if self.feature_branch is None:
+            return self.head(img_feat)
         tab_feat = self.feature_branch(features)
-        combined = torch.cat([img_feat, tab_feat], dim=1)
-        return self.head(combined)
+        return self.head(torch.cat([img_feat, tab_feat], dim=1))

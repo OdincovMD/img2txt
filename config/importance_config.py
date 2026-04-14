@@ -105,73 +105,10 @@ NUM_LABELS = len(LABEL_NAMES)
 LABEL_TO_IDX = {name: i for i, name in enumerate(LABEL_NAMES)}
 
 
-# Сырые числовые признаки для векторного входа модели.
-# Только те, что реально присутствуют как числа в pipeline-датафрейме (плоские колонки).
-# Для составных меток (asymmetry, shape, texture...) используются их прокси-числа:
-#   shape/borders → circularity
-#   texture       → glcm_homogeneity
-#   texture_coars → glcm_contrast
-#   structure_ord → lbp_uniformity
-#   dominant_hue  → mean_H_lesion
-#   contrast      → color_distance_deltaE
-#   elongation    → aspect_ratio  (+ eccentricity уже есть)
-FEAT_KEYS: List[str] = [
-    # Цветовые градиенты
-    "delta_H_center_periphery",
-    "delta_S_center_periphery",
-    "delta_V_center_periphery",
-    "delta_V_left_right",
-    "delta_S_left_right",
-    "delta_V_top_bottom",
-    "delta_S_top_bottom",
-    "delta_V_inner_rim",
-    # Глобальная цветовая статистика
-    "mean_H_lesion",
-    "mean_S_lesion",
-    "mean_V_lesion",
-    "std_H_lesion",
-    "std_S_lesion",
-    "std_V_lesion",
-    "entropy_H_lesion",
-    "entropy_S_lesion",
-    "entropy_V_lesion",
-    "color_balance_R",
-    "color_balance_G",
-    "color_balance_B",
-    "color_distance_euclidean",
-    "color_distance_deltaE",
-    # Доли пикселей
-    "percent_dark_pixels",
-    "percent_white_pixels",
-    "percent_red_pixels",
-    "percent_blue_pixels",
-    "percent_outlier_bright_pixels",
-    "percent_outlier_dark_pixels",
-    # Форма
-    "area",
-    "perimeter",
-    "circularity",
-    "aspect_ratio",
-    "eccentricity",
-    "solidity",
-    "extent",
-    "perimeter_area_ratio",
-    "radial_variance",
-    "convexity",
-    "fractal_dimension",
-    # Текстура GLCM
-    "glcm_contrast",
-    "glcm_homogeneity",
-    "glcm_energy",
-    "glcm_entropy",
-    # Текстура LBP
-    "lbp_uniformity",
-    "lbp_entropy",
-    "lbp_mean",
-    "lbp_std",
-    "lbp_median",
-]
-FEAT_DIM: int = len(FEAT_KEYS)
+# Табличный вход модели — one-hot кодирование бакетированных значений тех же LABEL_NAMES.
+# Размер вектора вычисляется динамически из словаря (build_label_vocab по train-выборке)
+# и сохраняется в чекпойнт. Ключей FEAT_KEYS/FEAT_DIM больше нет — они неявно равны LABEL_NAMES
+# и сумме размеров словарей на каждый ключ соответственно.
 
 
 def expert_string_to_label_key(s: str) -> str:

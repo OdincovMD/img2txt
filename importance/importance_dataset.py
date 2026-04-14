@@ -13,7 +13,7 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
-from config.importance_config import FEAT_KEYS, LABEL_NAMES, LABEL_TO_IDX, expert_string_to_label_key
+from config.importance_config import LABEL_NAMES, LABEL_TO_IDX, expert_string_to_label_key
 
 
 def parse_expert_labels(row, label_columns: Optional[List[str]] = None) -> List[str]:
@@ -68,25 +68,67 @@ def build_target_vector(expert_label_strings: List[str]) -> torch.Tensor:
     return target
 
 
-def extract_feat_vector(
+def _parse_labels_json(row_dict: dict) -> dict:
+    """Извлекает бакетированный словарь меток из строки датафрейма."""
+    raw = row_dict.get("labels_json")
+    if raw is None or (isinstance(raw, float) and np.isnan(raw)):
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            return json.loads(raw)
+        except Exception:
+            return {}
+    return {}
+
+
+def build_label_vocab(df: pd.DataFrame) -> Dict[str, Dict[str, int]]:
+    """
+    Собирает словарь возможных значений для каждого ключа из LABEL_NAMES по train-выборке.
+    Возвращает {label_key: {value_str: index}}.
+    Только строковые значения (для активных LABEL_NAMES они все строковые).
+    """
+    collected: Dict[str, set] = {k: set() for k in LABEL_NAMES}
+    for _, row in df.iterrows():
+        d = _parse_labels_json(row.to_dict())
+        for k in LABEL_NAMES:
+            v = d.get(k)
+            if isinstance(v, str) and v.strip():
+                collected[k].add(v.strip())
+    vocab: Dict[str, Dict[str, int]] = {}
+    for k in LABEL_NAMES:
+        vocab[k] = {val: i for i, val in enumerate(sorted(collected[k]))}
+    return vocab
+
+
+def vocab_dim(vocab: Dict[str, Dict[str, int]]) -> int:
+    return sum(len(v) for v in vocab.values())
+
+
+def encode_bucket_vector(
     row_dict: dict,
-    feat_mean: Dict[str, float],
-    feat_std: Dict[str, float],
+    vocab: Dict[str, Dict[str, int]],
 ) -> torch.Tensor:
     """
-    Из плоского словаря строки датафрейма строит нормализованный вектор длины FEAT_DIM.
-    Ключи — FEAT_KEYS (49 сырых числовых признаков из pipeline-колонок).
-    Отсутствующие или нечисловые значения → 0.0 (= среднее после нормализации).
+    По бакетированному словарю меток строит one-hot вектор конкатенацией
+    one-hot кодировок для каждого ключа из LABEL_NAMES в порядке LABEL_NAMES.
+    Если значение отсутствует/незнакомо — сегмент остаётся нулевым.
     """
-    vec = []
-    for k in FEAT_KEYS:
-        v = row_dict.get(k)
-        if isinstance(v, (int, float)) and not (isinstance(v, float) and np.isnan(v)) and np.isfinite(v):
-            normalized = (float(v) - feat_mean.get(k, 0.0)) / feat_std.get(k, 1.0)
-        else:
-            normalized = 0.0
-        vec.append(normalized)
-    return torch.tensor(vec, dtype=torch.float32)
+    d = _parse_labels_json(row_dict)
+    segments = []
+    for k in LABEL_NAMES:
+        sub = vocab.get(k, {})
+        seg = torch.zeros(len(sub), dtype=torch.float32)
+        v = d.get(k)
+        if isinstance(v, str):
+            idx = sub.get(v.strip())
+            if idx is not None:
+                seg[idx] = 1.0
+        segments.append(seg)
+    if not segments:
+        return torch.zeros(0, dtype=torch.float32)
+    return torch.cat(segments, dim=0)
 
 
 class ImportanceDataset(Dataset):
@@ -101,8 +143,7 @@ class ImportanceDataset(Dataset):
         image_dir: Union[str, Path],
         image_col: str = "filename",
         image_id_col: str = "image_id",
-        feat_mean: Optional[Dict[str, float]] = None,
-        feat_std: Optional[Dict[str, float]] = None,
+        vocab: Optional[Dict[str, Dict[str, int]]] = None,
         mask_dir: Optional[Union[str, Path]] = None,
         mask_suffix: str = "_mask.png",
         label_columns: Optional[List[str]] = None,
@@ -126,8 +167,7 @@ class ImportanceDataset(Dataset):
         self.image_dir = Path(image_dir)
         self.image_col = image_col
         self.image_id_col = image_id_col
-        self.feat_mean = feat_mean or {}
-        self.feat_std = feat_std or {}
+        self.vocab = vocab or {}
         self.mask_dir = Path(mask_dir) if mask_dir else None
         self.mask_suffix = mask_suffix
         self.label_columns = label_columns
@@ -222,7 +262,7 @@ class ImportanceDataset(Dataset):
                     mask = np.zeros(image.shape[:2], dtype=np.uint8)
                 image = np.concatenate([image, mask[..., None]], axis=-1)
 
-        features = extract_feat_vector(row.to_dict(), self.feat_mean, self.feat_std)
+        features = encode_bucket_vector(row.to_dict(), self.vocab)
 
         expert_strings = parse_expert_labels(row, self.label_columns)
         target = build_target_vector(expert_strings)

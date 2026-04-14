@@ -41,8 +41,14 @@ try:
 except ImportError:
     transforms = None
 
-from config.importance_config import FEAT_KEYS, LABEL_NAMES, NUM_LABELS
-from importance.importance_dataset import ImportanceDataset, parse_expert_labels, build_target_vector
+from config.importance_config import LABEL_NAMES, NUM_LABELS
+from importance.importance_dataset import (
+    ImportanceDataset,
+    parse_expert_labels,
+    build_target_vector,
+    build_label_vocab,
+    vocab_dim,
+)
 from importance.importance_metrics import precision_recall_at_k_batch
 from importance.importance_model import ImportanceModel
 
@@ -153,32 +159,6 @@ def _smooth_targets(targets: torch.Tensor, smoothing: float) -> torch.Tensor:
     return targets * (1.0 - smoothing) + smoothing * 0.5
 
 
-def compute_feat_stats(df: pd.DataFrame) -> tuple:
-    """
-    Вычисляет mean и std для каждого ключа FEAT_KEYS по плоским колонкам df.
-    Возвращает (feat_mean, feat_std) — словари {key: float}.
-    """
-    accum = {k: [] for k in FEAT_KEYS}
-    for k in FEAT_KEYS:
-        if k not in df.columns:
-            continue
-        vals = pd.to_numeric(df[k], errors="coerce").dropna()
-        vals = vals[np.isfinite(vals)]
-        accum[k] = vals.tolist()
-
-    feat_mean = {}
-    feat_std = {}
-    for k in FEAT_KEYS:
-        vals = accum[k]
-        if vals:
-            feat_mean[k] = float(np.mean(vals))
-            feat_std[k] = max(float(np.std(vals)), 1e-6)
-        else:
-            feat_mean[k] = 0.0
-            feat_std[k] = 1.0
-    return feat_mean, feat_std
-
-
 def train_importance(
     data_csv: Union[str, Path],
     image_dir: Union[str, Path],
@@ -265,10 +245,13 @@ def train_importance(
     train_df = df[~val_mask].copy()
     print(f"Train: {len(train_df)}, Val: {len(val_df)}")
 
-    # ---- Статистики нормализации признаков (только по train) ----
-    feat_mean, feat_std = compute_feat_stats(train_df)
-    print(f"Feature stats computed from {len(train_df)} train samples "
-          f"({sum(1 for v in feat_mean.values() if v != 0.0)} non-zero means)")
+    # ---- Словарь one-hot для бакетированных признаков (только по train) ----
+    vocab = build_label_vocab(train_df)
+    feat_input_dim = vocab_dim(vocab)
+    print(f"Built label vocab from {len(train_df)} train samples: "
+          f"{len(vocab)} labels, total one-hot dim = {feat_input_dim}")
+    for k in LABEL_NAMES:
+        print(f"  {k}: {len(vocab[k])} values")
 
     # ---- Трансформы ----
     in_channels = 4 if use_mask else 3
@@ -279,8 +262,7 @@ def train_importance(
     ds_kwargs = dict(
         image_col=image_col,
         image_id_col=image_id_col,
-        feat_mean=feat_mean,
-        feat_std=feat_std,
+        vocab=vocab,
         mask_dir=mask_dir_s,
         use_mask_channel=use_mask,
         preload_to_memory=preload_to_memory,
@@ -314,6 +296,7 @@ def train_importance(
         pretrained=True,
         in_channels=in_channels,
         dropout=dropout,
+        feat_input_dim=feat_input_dim,
     ).to(device)
 
     # ---- pos_weight по частоте меток в train ----
@@ -347,7 +330,9 @@ def train_importance(
     else:
         raise ValueError(f"Unknown loss_type: {loss_type}")
 
-    head_params = list(model.head.parameters()) + list(model.feature_branch.parameters())
+    head_params = list(model.head.parameters())
+    if model.feature_branch is not None:
+        head_params += list(model.feature_branch.parameters())
     backbone_params = list(model.backbone.parameters())
     optimizer = torch.optim.AdamW([
         {"params": head_params, "lr": lr},
@@ -481,7 +466,8 @@ def train_importance(
                 "rec10": rec10,
                 "args": run_config,
                 "label_names": LABEL_NAMES,
-                "feat_stats": {"mean": feat_mean, "std": feat_std},
+                "vocab": vocab,
+                "feat_input_dim": feat_input_dim,
             }
             torch.save(ckpt, out_dir / "best.pt")
             print(f"  -> saved best.pt (score={score:.4f})")

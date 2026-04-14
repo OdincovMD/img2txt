@@ -14,8 +14,8 @@ import torch
 from tqdm import tqdm
 
 from analysis.threshold_rules import row_to_labels
-from config.importance_config import FEAT_KEYS, LABEL_NAMES, NUM_LABELS
-from importance.importance_dataset import extract_feat_vector
+from config.importance_config import LABEL_NAMES, NUM_LABELS
+from importance.importance_dataset import encode_bucket_vector, vocab_dim
 from importance.importance_model import ImportanceModel
 
 try:
@@ -33,22 +33,21 @@ def load_model(
     args = ckpt.get("args", {})
     backbone = args.get("backbone", "efficientnet_b0")
     in_channels = 4 if args.get("use_mask") else 3
+    vocab = ckpt.get("vocab", {})
+    feat_input_dim = ckpt.get("feat_input_dim", vocab_dim(vocab) if vocab else 0)
     model = ImportanceModel(
         backbone_name=backbone,
         num_labels=NUM_LABELS,
         pretrained=False,
         in_channels=in_channels,
+        feat_input_dim=feat_input_dim,
     )
     model.load_state_dict(ckpt["model_state_dict"], strict=True)
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device).eval()
 
-    # Сохраняем статистики нормализации признаков на объекте модели
-    feat_stats = ckpt.get("feat_stats", {})
-    model.feat_mean = feat_stats.get("mean", {})
-    model.feat_std = feat_stats.get("std", {})
-
+    model.vocab = vocab
     return model
 
 
@@ -160,11 +159,10 @@ def _predict_from_row(
     image = np.array(Image.open(image_path).convert("RGB"))
     labels_dict = row_to_labels(row.to_dict())
 
-    feat_vector = extract_feat_vector(
-        row.to_dict(),
-        feat_mean=getattr(model, "feat_mean", {}),
-        feat_std=getattr(model, "feat_std", {}),
-    )
+    # Для инференса берём бакетированные метки из pipeline (row_to_labels),
+    # кладём их в "labels_json" и кодируем тем же one-hot словарём, что использовался при тренировке.
+    row_for_encode = {"labels_json": labels_dict}
+    feat_vector = encode_bucket_vector(row_for_encode, getattr(model, "vocab", {}))
 
     mask = None
     if mask_dir:
