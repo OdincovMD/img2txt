@@ -65,22 +65,23 @@ class TrainConfig:
     backbone: Literal["efficientnet_b0", "resnet18", "resnet34"] = "efficientnet_b0"
     pretrained: bool = True
     use_mask: bool = False                    # 4-й канал = маска
-    dropout: float = 0.3
+    dropout: float = 0.1                     # было 0.3 — слишком агрессивно на 340 samples
     image_size: int = 224
 
     # Обучение
     epochs: int = 50
     batch_size: int = 16
-    lr: float = 1e-4
-    backbone_lr_factor: float = 0.1           # lr бэкбона = lr * factor
+    lr: float = 1e-3                          # было 1e-4 — слишком медленно (overfit test подтвердил)
+    feature_branch_lr_factor: float = 3.0     # lr feature_branch = lr * factor (она недоучивается)
+    backbone_lr_factor: float = 0.01          # lr бэкбона = lr * factor
     weight_decay: float = 1e-3
     freeze_backbone_epochs: int = 5
-    label_smoothing: float = 0.05
+    label_smoothing: float = 0.0              # было 0.05 — убрал, на 340 samples только мешает
 
     # Лосс
     loss_type: Literal["bce", "focal"] = "bce"
     focal_gamma: float = 2.0
-    use_pos_weight: bool = True
+    use_pos_weight: bool = False              # ВЫКЛЮЧЕН: убивал ранкинг (pw=0.16 для частых меток)
     pos_weight_cap: float = 10.0
 
     # Аугментации

@@ -212,16 +212,23 @@ def create_model(feat_dim: int, train_df, cfg: TrainConfig):
     else:
         raise ValueError(f"Unknown loss_type: {cfg.loss_type}")
 
-    # Оптимизатор: голова — полный lr, бэкбон — lr * factor
+    # Оптимизатор: 3 группы с разным lr
     head_params = list(model.head.parameters())
-    if model.feature_branch is not None:
-        head_params += list(model.feature_branch.parameters())
     backbone_params = list(model.backbone.parameters())
 
-    optimizer = torch.optim.AdamW([
+    param_groups = [
         {"params": head_params, "lr": cfg.lr},
         {"params": backbone_params, "lr": cfg.lr * cfg.backbone_lr_factor},
-    ], weight_decay=cfg.weight_decay)
+    ]
+    if model.feature_branch is not None:
+        branch_params = list(model.feature_branch.parameters())
+        param_groups.append(
+            {"params": branch_params, "lr": cfg.lr * cfg.feature_branch_lr_factor}
+        )
+    else:
+        branch_params = []
+
+    optimizer = torch.optim.AdamW(param_groups, weight_decay=cfg.weight_decay)
 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=cfg.epochs
@@ -313,7 +320,7 @@ def train_loop(
 
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
-            nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
             scaler.step(optimizer)
             scaler.update()
             running_loss += loss.item()

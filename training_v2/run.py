@@ -38,13 +38,14 @@ def main():
         backbone="efficientnet_b0",
         epochs=50,
         batch_size=16,
-        lr=1e-4,
+        lr=1e-3,                    # было 1e-4
         image_size=224,
         use_mask=False,
         freeze_backbone_epochs=5,
-        label_smoothing=0.05,
+        label_smoothing=0.0,        # было 0.05
         aug_strength="mild",
-        dropout=0.3,
+        dropout=0.1,                # было 0.3
+        use_pos_weight=False,       # ВЫКЛЮЧЕН
         preload_to_memory=True,
         out_dir="training_v2/checkpoints",
     )
