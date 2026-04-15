@@ -1,6 +1,12 @@
 """
 Модель v2: CNN backbone + табличная ветка + голова (24 выхода, sigmoid).
 
+Архитектура перестроена так, чтобы табличные признаки (бакетированные)
+доминировали над визуальными:
+  - Feature branch: 2 слоя, dim=256 → BN → ReLU → Dropout → 256
+  - Image projection: 512 → 128 (понижаем вес визуальных)
+  - Head: 384 → 128 → 24
+
 Поддерживаемые backbone: efficientnet_b0, resnet18, resnet34.
 """
 
@@ -67,12 +73,22 @@ def get_backbone(name: str, pretrained: bool = True, in_channels: int = 3):
 
 class ImportanceModelV2(nn.Module):
     """
-    Backbone (CNN)  ──┐
-                      ├── concat ── head ── logits (B, NUM_LABELS)
-    Feature branch ───┘
+    Архитектура с акцентом на табличные признаки:
 
-    forward(image, features) → logits  (без sigmoid, для BCEWithLogitsLoss)
+    Feature branch (256-d) ────┐
+                               ├── concat (384-d) ── head ── logits (24)
+    Backbone → img_proj (128) ─┘
+
+    Табличная ветка 2x шире визуальной проекции — модель
+    опирается на бакетированные признаки больше, чем на CNN.
+
+    forward(image, features) → logits (без sigmoid, для BCEWithLogitsLoss)
     """
+
+    # Размерности внутренних проекций
+    TAB_HIDDEN = 256    # табличная ветка — доминирующая
+    IMG_PROJ = 128      # проекция backbone — вспомогательная
+    HEAD_HIDDEN = 128   # скрытый слой головы
 
     def __init__(
         self,
@@ -90,29 +106,50 @@ class ImportanceModelV2(nn.Module):
         self.num_labels = num_labels
         self.feat_input_dim = feat_input_dim
 
-        # Табличная ветка (если есть бакетированные признаки)
-        tab_dim = 0
+        # ── Проекция визуальных признаков (понижаем размерность) ──
+        self.img_projection = nn.Sequential(
+            nn.Linear(img_dim, self.IMG_PROJ),
+            nn.LayerNorm(self.IMG_PROJ),
+            nn.ReLU(),
+        )
+
+        # ── Табличная ветка (доминирующая) ──
+        tab_out = 0
         if feat_input_dim > 0:
-            tab_dim = 64
+            tab_out = self.TAB_HIDDEN
             self.feature_branch = nn.Sequential(
-                nn.Linear(feat_input_dim, tab_dim),
+                nn.Linear(feat_input_dim, self.TAB_HIDDEN),
+                nn.BatchNorm1d(self.TAB_HIDDEN),
+                nn.ReLU(),
+                nn.Dropout(p=dropout * 0.5),  # лёгкий dropout внутри ветки
+                nn.Linear(self.TAB_HIDDEN, self.TAB_HIDDEN),
+                nn.BatchNorm1d(self.TAB_HIDDEN),
                 nn.ReLU(),
             )
         else:
             self.feature_branch = None
 
+        # ── Голова: 2 слоя с dropout ──
+        combined_dim = self.IMG_PROJ + tab_out
         self.head = nn.Sequential(
             nn.Dropout(p=dropout),
-            nn.Linear(img_dim + tab_dim, num_labels),
+            nn.Linear(combined_dim, self.HEAD_HIDDEN),
+            nn.ReLU(),
+            nn.Dropout(p=dropout * 0.5),
+            nn.Linear(self.HEAD_HIDDEN, num_labels),
         )
 
     def forward(self, x: torch.Tensor, features: torch.Tensor) -> torch.Tensor:
+        # Визуальные → 128-мерная проекция
         img_feat = self.backbone(x)                         # (B, img_dim)
+        img_proj = self.img_projection(img_feat)            # (B, 128)
+
         if self.feature_branch is not None:
-            tab_feat = self.feature_branch(features)        # (B, 64)
-            combined = torch.cat([img_feat, tab_feat], dim=1)
+            tab_feat = self.feature_branch(features)        # (B, 256)
+            combined = torch.cat([img_proj, tab_feat], dim=1)  # (B, 384)
         else:
-            combined = img_feat
+            combined = img_proj
+
         return self.head(combined)                          # (B, num_labels)
 
 
@@ -130,6 +167,8 @@ def debug_model(model: ImportanceModelV2, in_channels: int = 3, feat_dim: int = 
     print(f"  Input image : {x.shape}")
     print(f"  Input feats : {f.shape}")
     print(f"  Output      : {out.shape}")
+    print(f"  img_proj dim: {model.IMG_PROJ}")
+    print(f"  tab_feat dim: {model.TAB_HIDDEN if model.feature_branch else 0}")
     total = sum(p.numel() for p in model.parameters())
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"  Parameters  : {total:,} total, {trainable:,} trainable")

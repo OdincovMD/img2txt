@@ -212,12 +212,14 @@ def create_model(feat_dim: int, train_df, cfg: TrainConfig):
     else:
         raise ValueError(f"Unknown loss_type: {cfg.loss_type}")
 
-    # Оптимизатор: 3 группы с разным lr
+    # Оптимизатор: 4 группы с разным lr
     head_params = list(model.head.parameters())
+    img_proj_params = list(model.img_projection.parameters())
     backbone_params = list(model.backbone.parameters())
 
     param_groups = [
         {"params": head_params, "lr": cfg.lr},
+        {"params": img_proj_params, "lr": cfg.lr},
         {"params": backbone_params, "lr": cfg.lr * cfg.backbone_lr_factor},
     ]
     if model.feature_branch is not None:
@@ -301,10 +303,12 @@ def train_loop(
             set_backbone_grad(True)
             for p in backbone_params:
                 optimizer.state.pop(p, None)
-            # Снижаем lr при разморозке — чтобы не сломать learned features
-            for pg in optimizer.param_groups:
-                pg["lr"] *= 0.3
-            print(f"  ── Epoch {epoch+1}: backbone unfrozen, lr ×0.3 ──")
+            # Сбрасываем scheduler на оставшиеся эпохи
+            remaining = cfg.epochs - epoch
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=remaining
+            )
+            print(f"  ── Epoch {epoch+1}: backbone unfrozen, scheduler reset for {remaining} epochs ──")
 
         # ── Train ──
         model.train()
@@ -324,7 +328,7 @@ def train_loop(
 
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
-            nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+            nn.utils.clip_grad_norm_(model.parameters(), max_norm=cfg.grad_clip_max_norm)
             scaler.step(optimizer)
             scaler.update()
             running_loss += loss.item()

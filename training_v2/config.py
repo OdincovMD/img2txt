@@ -65,28 +65,29 @@ class TrainConfig:
     backbone: Literal["efficientnet_b0", "resnet18", "resnet34"] = "efficientnet_b0"
     pretrained: bool = True
     use_mask: bool = False                    # 4-й канал = маска
-    dropout: float = 0.1                     # было 0.3 — слишком агрессивно на 340 samples
+    dropout: float = 0.3                      # увеличен: 340 samples → нужна регуляризация
     image_size: int = 224
 
     # Обучение
-    epochs: int = 50
+    epochs: int = 80
     batch_size: int = 16
-    lr: float = 1e-3                          # было 1e-4 — слишком медленно (overfit test подтвердил)
-    feature_branch_lr_factor: float = 3.0     # lr feature_branch = lr * factor (она недоучивается)
-    backbone_lr_factor: float = 0.01          # lr бэкбона = lr * factor
+    lr: float = 1e-3
+    feature_branch_lr_factor: float = 3.0     # lr feature_branch = lr * factor
+    backbone_lr_factor: float = 0.1           # lr бэкбона = lr * factor (было 0.01 — слишком мало)
     weight_decay: float = 1e-3
-    freeze_backbone_epochs: int = 25           # backbone замораживаем НАДОЛГО (340 samples!)
-    label_smoothing: float = 0.0              # было 0.05 — убрал, на 340 samples только мешает
+    freeze_backbone_epochs: int = 10          # было 25 — слишком долго, head переобучается
+    label_smoothing: float = 0.05             # включён: помогает против overfit на шумных метках
     early_stopping_patience: int = 15         # стоп если нет улучшений
+    grad_clip_max_norm: float = 1.0           # было 5.0 — слишком мягко
 
     # Лосс
     loss_type: Literal["bce", "focal"] = "bce"
     focal_gamma: float = 2.0
-    use_pos_weight: bool = False              # ВЫКЛЮЧЕН: убивал ранкинг (pw=0.16 для частых меток)
+    use_pos_weight: bool = False
     pos_weight_cap: float = 10.0
 
     # Аугментации
-    aug_strength: Literal["none", "mild", "strong"] = "strong"  # обязательно на 340 samples
+    aug_strength: Literal["none", "medical", "mild", "strong"] = "medical"
 
     # Система
     num_workers: int = 0

@@ -41,10 +41,10 @@ def main():
         lr=1e-3,
         image_size=224,
         use_mask=False,
-        freeze_backbone_epochs=25,    # backbone замораживаем надолго
-        label_smoothing=0.0,
-        aug_strength="strong",        # обязательно на 340 samples
-        dropout=0.1,
+        freeze_backbone_epochs=10,    # было 25 — head переобучалась
+        label_smoothing=0.05,         # помогает от overfit на шумных метках
+        aug_strength="medical",       # ColorJitter + RandomErasing (без flip/crop)
+        dropout=0.3,                  # было 0.1 — усиливаем регуляризацию
         use_pos_weight=False,
         early_stopping_patience=15,
         preload_to_memory=True,
