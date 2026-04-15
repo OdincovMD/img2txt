@@ -75,8 +75,9 @@ class TrainConfig:
     feature_branch_lr_factor: float = 3.0     # lr feature_branch = lr * factor (она недоучивается)
     backbone_lr_factor: float = 0.01          # lr бэкбона = lr * factor
     weight_decay: float = 1e-3
-    freeze_backbone_epochs: int = 5
+    freeze_backbone_epochs: int = 25           # backbone замораживаем НАДОЛГО (340 samples!)
     label_smoothing: float = 0.0              # было 0.05 — убрал, на 340 samples только мешает
+    early_stopping_patience: int = 15         # стоп если нет улучшений
 
     # Лосс
     loss_type: Literal["bce", "focal"] = "bce"
@@ -85,7 +86,7 @@ class TrainConfig:
     pos_weight_cap: float = 10.0
 
     # Аугментации
-    aug_strength: Literal["none", "mild", "strong"] = "mild"
+    aug_strength: Literal["none", "mild", "strong"] = "strong"  # обязательно на 340 samples
 
     # Система
     num_workers: int = 0

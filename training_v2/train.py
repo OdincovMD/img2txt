@@ -278,6 +278,7 @@ def train_loop(
         print(f"  Backbone frozen for first {cfg.freeze_backbone_epochs} epochs")
 
     best_score = 0.0
+    epochs_no_improve = 0
     run_config = {
         "backbone": cfg.backbone,
         "epochs": cfg.epochs,
@@ -300,7 +301,10 @@ def train_loop(
             set_backbone_grad(True)
             for p in backbone_params:
                 optimizer.state.pop(p, None)
-            print(f"  ── Epoch {epoch+1}: backbone unfrozen ──")
+            # Снижаем lr при разморозке — чтобы не сломать learned features
+            for pg in optimizer.param_groups:
+                pg["lr"] *= 0.3
+            print(f"  ── Epoch {epoch+1}: backbone unfrozen, lr ×0.3 ──")
 
         # ── Train ──
         model.train()
@@ -382,6 +386,12 @@ def train_loop(
             }
             torch.save(ckpt, out_dir / "best.pt")
             print(f"  → saved best.pt (score={score:.4f})")
+            epochs_no_improve = 0
+        else:
+            epochs_no_improve += 1
+            if epochs_no_improve >= cfg.early_stopping_patience:
+                print(f"\n  Early stopping: {epochs_no_improve} epochs без улучшения")
+                break
 
         gc.collect()
 

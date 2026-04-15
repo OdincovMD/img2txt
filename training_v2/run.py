@@ -36,16 +36,17 @@ def main():
         annotations_csv="annotations.csv",
         image_dir=".",
         backbone="efficientnet_b0",
-        epochs=50,
+        epochs=80,
         batch_size=16,
-        lr=1e-3,                    # было 1e-4
+        lr=1e-3,
         image_size=224,
         use_mask=False,
-        freeze_backbone_epochs=5,
-        label_smoothing=0.0,        # было 0.05
-        aug_strength="mild",
-        dropout=0.1,                # было 0.3
-        use_pos_weight=False,       # ВЫКЛЮЧЕН
+        freeze_backbone_epochs=25,    # backbone замораживаем надолго
+        label_smoothing=0.0,
+        aug_strength="strong",        # обязательно на 340 samples
+        dropout=0.1,
+        use_pos_weight=False,
+        early_stopping_patience=15,
         preload_to_memory=True,
         out_dir="training_v2/checkpoints",
     )
