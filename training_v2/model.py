@@ -82,6 +82,8 @@ class ImportanceModelV2(nn.Module):
     Табличная ветка 2x шире визуальной проекции — модель
     опирается на бакетированные признаки больше, чем на CNN.
 
+    skip_image=True — отключает backbone (ablation: только табличные фичи).
+
     forward(image, features) → logits (без sigmoid, для BCEWithLogitsLoss)
     """
 
@@ -98,20 +100,28 @@ class ImportanceModelV2(nn.Module):
         in_channels: int = 3,
         dropout: float = 0.3,
         feat_input_dim: int = 0,
+        skip_image: bool = False,
     ):
         super().__init__()
-        self.backbone, img_dim = get_backbone(
-            backbone_name, pretrained=pretrained, in_channels=in_channels
-        )
         self.num_labels = num_labels
         self.feat_input_dim = feat_input_dim
+        self.skip_image = skip_image
 
-        # ── Проекция визуальных признаков (понижаем размерность) ──
-        self.img_projection = nn.Sequential(
-            nn.Linear(img_dim, self.IMG_PROJ),
-            nn.LayerNorm(self.IMG_PROJ),
-            nn.ReLU(),
-        )
+        # ── Визуальная ветка (отключается при skip_image) ──
+        img_out = 0
+        if not skip_image:
+            self.backbone, img_dim = get_backbone(
+                backbone_name, pretrained=pretrained, in_channels=in_channels
+            )
+            self.img_projection = nn.Sequential(
+                nn.Linear(img_dim, self.IMG_PROJ),
+                nn.LayerNorm(self.IMG_PROJ),
+                nn.ReLU(),
+            )
+            img_out = self.IMG_PROJ
+        else:
+            self.backbone = None
+            self.img_projection = None
 
         # ── Табличная ветка (доминирующая) ──
         tab_out = 0
@@ -121,7 +131,7 @@ class ImportanceModelV2(nn.Module):
                 nn.Linear(feat_input_dim, self.TAB_HIDDEN),
                 nn.BatchNorm1d(self.TAB_HIDDEN),
                 nn.ReLU(),
-                nn.Dropout(p=dropout * 0.5),  # лёгкий dropout внутри ветки
+                nn.Dropout(p=dropout * 0.5),
                 nn.Linear(self.TAB_HIDDEN, self.TAB_HIDDEN),
                 nn.BatchNorm1d(self.TAB_HIDDEN),
                 nn.ReLU(),
@@ -130,7 +140,7 @@ class ImportanceModelV2(nn.Module):
             self.feature_branch = None
 
         # ── Голова: 2 слоя с dropout ──
-        combined_dim = self.IMG_PROJ + tab_out
+        combined_dim = img_out + tab_out
         self.head = nn.Sequential(
             nn.Dropout(p=dropout),
             nn.Linear(combined_dim, self.HEAD_HIDDEN),
@@ -140,17 +150,19 @@ class ImportanceModelV2(nn.Module):
         )
 
     def forward(self, x: torch.Tensor, features: torch.Tensor) -> torch.Tensor:
-        # Визуальные → 128-мерная проекция
-        img_feat = self.backbone(x)                         # (B, img_dim)
-        img_proj = self.img_projection(img_feat)            # (B, 128)
+        parts = []
+
+        if not self.skip_image:
+            img_feat = self.backbone(x)                         # (B, img_dim)
+            img_proj = self.img_projection(img_feat)            # (B, 128)
+            parts.append(img_proj)
 
         if self.feature_branch is not None:
-            tab_feat = self.feature_branch(features)        # (B, 256)
-            combined = torch.cat([img_proj, tab_feat], dim=1)  # (B, 384)
-        else:
-            combined = img_proj
+            tab_feat = self.feature_branch(features)            # (B, 256)
+            parts.append(tab_feat)
 
-        return self.head(combined)                          # (B, num_labels)
+        combined = torch.cat(parts, dim=1) if len(parts) > 1 else parts[0]
+        return self.head(combined)                              # (B, num_labels)
 
 
 def debug_model(model: ImportanceModelV2, in_channels: int = 3, feat_dim: int = 0):

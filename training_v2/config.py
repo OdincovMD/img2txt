@@ -67,6 +67,7 @@ class TrainConfig:
     use_mask: bool = False                    # 4-й канал = маска
     dropout: float = 0.3                      # увеличен: 340 samples → нужна регуляризация
     image_size: int = 224
+    skip_image: bool = False                  # True = табличная модель без CNN (ablation)
 
     # Обучение
     epochs: int = 80

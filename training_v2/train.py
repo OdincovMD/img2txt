@@ -171,6 +171,7 @@ def create_model(feat_dim: int, train_df, cfg: TrainConfig):
     """Создаёт модель, оптимизатор, лосс-функцию."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     in_ch = 4 if cfg.use_mask else 3
+    skip_image = getattr(cfg, 'skip_image', False)
 
     model = ImportanceModelV2(
         backbone_name=cfg.backbone,
@@ -179,6 +180,7 @@ def create_model(feat_dim: int, train_df, cfg: TrainConfig):
         in_channels=in_ch,
         dropout=cfg.dropout,
         feat_input_dim=feat_dim,
+        skip_image=skip_image,
     ).to(device)
 
     # pos_weight
@@ -212,23 +214,23 @@ def create_model(feat_dim: int, train_df, cfg: TrainConfig):
     else:
         raise ValueError(f"Unknown loss_type: {cfg.loss_type}")
 
-    # Оптимизатор: 4 группы с разным lr
+    # Оптимизатор: группы параметров с разным lr
+    param_groups = []
     head_params = list(model.head.parameters())
-    img_proj_params = list(model.img_projection.parameters())
-    backbone_params = list(model.backbone.parameters())
+    param_groups.append({"params": head_params, "lr": cfg.lr})
 
-    param_groups = [
-        {"params": head_params, "lr": cfg.lr},
-        {"params": img_proj_params, "lr": cfg.lr},
-        {"params": backbone_params, "lr": cfg.lr * cfg.backbone_lr_factor},
-    ]
+    backbone_params = []
+    if not skip_image:
+        img_proj_params = list(model.img_projection.parameters())
+        backbone_params = list(model.backbone.parameters())
+        param_groups.append({"params": img_proj_params, "lr": cfg.lr})
+        param_groups.append({"params": backbone_params, "lr": cfg.lr * cfg.backbone_lr_factor})
+
     if model.feature_branch is not None:
         branch_params = list(model.feature_branch.parameters())
         param_groups.append(
             {"params": branch_params, "lr": cfg.lr * cfg.feature_branch_lr_factor}
         )
-    else:
-        branch_params = []
 
     optimizer = torch.optim.AdamW(param_groups, weight_decay=cfg.weight_decay)
 
@@ -238,9 +240,10 @@ def create_model(feat_dim: int, train_df, cfg: TrainConfig):
 
     total_p = sum(p.numel() for p in model.parameters())
     train_p = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"[5/6 create_model] {cfg.backbone} on {device}")
+    mode = "TABULAR-ONLY" if skip_image else cfg.backbone
+    print(f"[5/6 create_model] {mode} on {device}")
     print(f"  Parameters: {total_p:,} total, {train_p:,} trainable")
-    print(f"  feat_input_dim={feat_dim}, in_channels={in_ch}")
+    print(f"  feat_input_dim={feat_dim}, in_channels={in_ch}, skip_image={skip_image}")
 
     return model, optimizer, scheduler, criterion, device, backbone_params
 
