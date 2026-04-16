@@ -3,7 +3,7 @@
 Точка входа для обучения v2 (XGBoost).
 
 Запуск:
-    python -m training_v2.run
+    python -m training.run
 """
 
 import sys
@@ -14,8 +14,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import optuna
-import training_v2.kaggle_optuna as kopt
-from training_v2.kaggle_optuna import (
+import training.kaggle_optuna as kopt
+from training.kaggle_optuna import (
     prepare_data_kaggle,
     objective_xgboost,
     train_best_model,
@@ -26,7 +26,7 @@ from training_v2.kaggle_optuna import (
 def main():
     features_csv = "features_dataset_bucket.csv"
     annotations_csv = "annotations.csv"
-    checkpoint_path = "training_v2/checkpoints/xgb_importance.pkl"
+    checkpoint_path = "training/checkpoints/xgb_importance.pkl"
     n_trials = 30
 
     print("=" * 70)

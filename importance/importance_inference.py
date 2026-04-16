@@ -13,7 +13,7 @@ from tqdm import tqdm
 
 from analysis.threshold_rules import row_to_labels
 from config.importance_config import LABEL_NAMES, NUM_LABELS
-from training_v2.kaggle_optuna import build_features_for_inference, load_checkpoint
+from training.kaggle_optuna import build_features_for_inference, load_checkpoint
 
 try:
     import xgboost as xgb

@@ -19,7 +19,7 @@ import pandas as pd
 import xgboost as xgb
 from sklearn.model_selection import train_test_split
 
-from training_v2.config import LABEL_NAMES, NUM_LABELS
+from training.config import LABEL_NAMES, NUM_LABELS
 
 # ----------------- КОНСТАНТЫ -----------------
 SEED = 42
@@ -489,7 +489,7 @@ if __name__ == "__main__":
             _X_train, _X_val, _y_train, _y_val, study.best_params
         )
         save_checkpoint(
-            "training_v2/checkpoints/xgb_importance.pkl",
+            "training/checkpoints/xgb_importance.pkl",
             best_models, _valid_target_indices, fitted_enc,
             all_features, study.best_params,
         )

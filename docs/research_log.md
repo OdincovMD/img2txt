@@ -189,9 +189,9 @@ Multi-label ranking: по изображению (RGB, опционально + 
 
 | Файл | Назначение |
 |---|---|
-| [training_v2/kaggle_optuna.py](../training_v2/kaggle_optuna.py) | Feature engineering, XGBoost обучение, Optuna, save/load checkpoint |
-| [training_v2/run.py](../training_v2/run.py) | Точка входа обучения: `python -m training_v2.run` |
-| [training_v2/config.py](../training_v2/config.py) | Реэкспорт LABEL_NAMES, TOP_K |
+| [trainingggle_optuna.py](../tratraininge_optuna.py) | Feature engineering, XGBoost обучение, Optuna, save/load checkpoint |
+| [trainingn.py](../tratrainingy) | Точка входа обучения: `python -m trainitraining
+| [trainingnfig.py](../tratrainingg.py) | Реэкспорт LABEL_NAMES, TOP_K |
 | [importance/importance_inference.py](../importance/importance_inference.py) | Инференс XGBoost: `rank_features_batch(df, checkpoint_path)` |
 | [config/importance_config.py](../config/importance_config.py) | `LABEL_NAMES`, `NUM_LABELS`, маппинг строк эксперта → ключи |
 | [core/segmentation.py](../core/segmentation.py) | YOLO + UNet, `segment_with_loaded_yolo` для батчевой генерации |
