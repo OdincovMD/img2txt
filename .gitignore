@@ -16,3 +16,8 @@ env/
 CLAUDE.md
 tmp/
 features_dataset_bucket.csv
+annotations.csv
+catboost_info/
+training_v2/checkpoints/
+*.pkl
+*.joblib

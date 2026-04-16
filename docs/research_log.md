@@ -2,7 +2,7 @@
 
 Документ фиксирует ход экспериментов по обучению модели ранжирования важных признаков дермоскопических изображений (Шаг 3 пайплайна img2txt). Предназначен как черновая база для научной работы.
 
-**Дата последнего обновления:** 2026-04-13
+**Дата последнего обновления:** 2026-04-16
 
 ---
 
@@ -96,6 +96,23 @@ Multi-label ranking: по изображению (RGB, опционально + 
 - **Частоты активных 24 признаков:** min 10.8% (`texture`), max 85.8% (`color_distance_euclidean`).
 - **Ожидание:** снижение NUM_LABELS 55→24 должно дать +3-5 pp согласно гипотезе 5.2. Результат будет зафиксирован после тренировочного рана.
 
+### 3.8. Попытка №5 — Мультимодальная нейросеть (CNN + Tabular)
+- **Мотивация:** Изображение содержит не всю информацию, бакетированные табличные признаки Шага 2 (24 штуки) уже извлекают физические свойства пятна. Почему бы не скормить их в голову модели напрямую?
+- **Изменения:** Добавлена новая ветка в `importance_model.py`. Бакетированные признаки конвертируются в 94-мерный one-hot вектор (размер словаря) и пробрасываются через 2 линейных слоя (tabular branch). Затем выход бэкбона (EfficientNet) конкатенируется с табличным эмбеддингом. Оптимальные параметры: `dropout=0.3`, `weight_decay=1e-3`, `use_pos_weight=True`.
+- **Результат:** Скор вырос с ~0.51 до **0.6136** (лучший результат для PyTorch-моделей).
+- **Вывод:** Сжатое пространство меток (24 признака) содержит львиную долю предиктивной силы. Изображение стало играть вспомогательную роль.
+
+### 3.9. Попытка №6 — Радикальный отказ от CNN в пользу бустинга (Tabular Only)
+- **Мотивация:** Если табличные признаки решают 90% задачи, а разрыв между EfficientNet и простыми эвристиками так мал, есть смысл полностью убрать нейросети. Это ускорит инференс в 100 раз и уберет зависимость от Torch/GPU.
+- **Изменения:**
+  1. Переход на градиентные бустинги: `CatBoostClassifier` (MultiLogloss) и `XGBoost` (ансамбль 24 бинарных классификаторов).
+  2. В качестве признаков использованы 13 сырых `float` колонок (прямые эквиваленты 24 целевых меток) + 24 `Target Encoding` категориальных бакета (библиотека `category_encoders`).
+  3. Для Multi-label Target Encoding применен трюк: таргетом для энкодера стала «Сложность изображения» (`y.sum(axis=1)`). Затем сырые значения перемножались с TE-векторами для создания `interactions`.
+  4. Оптимизация гиперпараметров через `Optuna`.
+- **Результат:** CatBoost с небольшой глубиной (depth=3..5) уверенно достиг **0.6071**. Ансамбль из 24-х бинарных XGBoost моделей с Optuna-оптимизацией достиг **0.6196** — лучший результат по проекту.
+- **Лучшие параметры XGBoost:** `max_depth=6, lr=0.015, n_estimators=1295, reg_lambda=2.51, reg_alpha=0.095, subsample=0.76, colsample_bytree=0.92, min_child_weight=3, gamma=3.23, max_bin=256`.
+- **Вывод:** Чистый градиентный бустинг превосходит тяжёлую мультимодальную нейросеть (0.6196 vs 0.6136). Визуальные эмбеддинги (EfficientNet) на этой задаче избыточны. Принят архитектурный курс на полную замену Шага 3 табличной ML-моделью (XGBoost). Весь нейросетевой код обучения удалён.
+
 ---
 
 ## 4. Технические проблемы и их решения
@@ -172,15 +189,14 @@ Multi-label ranking: по изображению (RGB, опционально + 
 
 | Файл | Назначение |
 |---|---|
-| [importance/train_importance.py](../importance/train_importance.py) | Цикл обучения, все гиперпараметры, sampler, pos_weight, malloc_trim |
-| [importance/importance_dataset.py](../importance/importance_dataset.py) | PyTorch Dataset, preload, маски как 4-й канал |
-| [importance/importance_model.py](../importance/importance_model.py) | Бэкбон + голова, адаптация под 4 канала |
-| [importance/importance_metrics.py](../importance/importance_metrics.py) | P@k, R@k |
-| [importance/pseudo_importance.py](../importance/pseudo_importance.py) | Генерация псевдо-разметки по z-score |
-| [core/segmentation.py](../core/segmentation.py) | YOLO + UNet, `segment_with_loaded_yolo` для батчевой генерации |
+| [training_v2/kaggle_optuna.py](../training_v2/kaggle_optuna.py) | Feature engineering, XGBoost обучение, Optuna, save/load checkpoint |
+| [training_v2/run.py](../training_v2/run.py) | Точка входа обучения: `python -m training_v2.run` |
+| [training_v2/config.py](../training_v2/config.py) | Реэкспорт LABEL_NAMES, TOP_K |
+| [importance/importance_inference.py](../importance/importance_inference.py) | Инференс XGBoost: `rank_features_batch(df, checkpoint_path)` |
 | [config/importance_config.py](../config/importance_config.py) | `LABEL_NAMES`, `NUM_LABELS`, маппинг строк эксперта → ключи |
+| [core/segmentation.py](../core/segmentation.py) | YOLO + UNet, `segment_with_loaded_yolo` для батчевой генерации |
 | [annotation/app.py](../annotation/app.py) | Мини-приложение ручной разметки |
-| [notebooks/img2txt2.ipynb](../notebooks/img2txt2.ipynb) | Эксперименты, tracemalloc, запуск обучения |
+| [notebooks/img2txt2.ipynb](../notebooks/img2txt2.ipynb) | Эксперименты, анализ данных |
 
 ---
 
@@ -401,3 +417,4 @@ python annotation/app.py --csv features_dataset_bucket.csv --output annotations.
 4. **Сегментационная маска как 4-й канал не даёт прироста** на efficientnet_b0 @ 224×224. Бэкбон и так находит ROI. Возможно, имеет смысл при больших моделях/разрешениях.
 5. **Утечка RAM в long-running обучении** — не в Python-heap, а в C/C++ (glibc fragmentation, Pillow, DataParallel). Решается `malloc_trim` + отказом от `pin_memory` при `num_workers=0` + contiguous numpy-кэшем.
 6. **Потолок при 200 аннотациях ≈ 0.51-0.57 P@10.** Основной путь роста — увеличение разметки или сжатие пространства меток до реально используемых.
+7. **Табличные бустинги (CatBoost/XGBoost) эквивалентны тяжелым нейросетям.** Как только признаки были ограничены 24 высокоуровневыми "сущностями", чисто табличный градиентный бустинг дал скор **0.607** против гибридного (CNN+Tabular) максимума **0.613**. Визуальные эмбеддинги (EfficientNet) на этой задаче практически избыточны. Ранжирование важных меток теперь можно делать за миллисекунды на CPU.
