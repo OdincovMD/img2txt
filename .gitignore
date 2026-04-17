@@ -21,3 +21,4 @@ catboost_info/
 training/checkpoints/
 *.pkl
 *.joblib
+.gitnexus

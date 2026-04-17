@@ -155,33 +155,3 @@ def _organize_features_structure(features_dict: Dict[str, float]) -> Dict[str, D
     return structure
 
 
-def get_label_statistics(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Get statistics on labels across the dataset.
-    Returns DataFrame with label value counts and percentages.
-    """
-    stats_list = []
-
-    # Iterate through label columns
-    for col in df.columns:
-        if col.startswith('labels'):
-            continue
-
-        if 'labels' in col or col == 'labels_json':
-            continue
-
-        # Try to extract label values
-        if col in df.columns and df[col].dtype == 'object':
-            try:
-                value_counts = df[col].value_counts()
-                for value, count in value_counts.items():
-                    stats_list.append({
-                        'label': col,
-                        'value': value,
-                        'count': count,
-                        'percentage': (count / len(df)) * 100,
-                    })
-            except:
-                pass
-
-    return pd.DataFrame(stats_list) if stats_list else pd.DataFrame()
