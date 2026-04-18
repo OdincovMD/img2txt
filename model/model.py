@@ -3,7 +3,7 @@
 import json
 import pickle
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import optuna
@@ -15,6 +15,7 @@ from bucketing.schema import bucket_column_name
 from extraction.derived_features import COMPOSITE_FEATURE_COLUMNS
 from extraction.feature_schema import FEATURE_COLUMNS
 from model.config import (
+    DEFAULT_FEATURE_SET,
     EARLY_STOPPING_ROUNDS,
     LABEL_NAMES,
     NUM_LABELS,
@@ -63,14 +64,22 @@ def get_numeric_feature_columns(df: pd.DataFrame) -> list[str]:
     return [col for col in ordered if col in df.columns and pd.api.types.is_numeric_dtype(df[col])]
 
 
-def get_bucket_feature_columns(df: pd.DataFrame) -> list[str]:
+FeatureSet = Literal["numeric_only", "selected_buckets", "all_buckets"]
+
+
+def get_bucket_feature_columns(df: pd.DataFrame, feature_set: FeatureSet = DEFAULT_FEATURE_SET) -> list[str]:
+    all_bucket_cols = sorted(col for col in df.columns if col.startswith(bucket_column_name("")))
+    if feature_set == "numeric_only":
+        return []
+    if feature_set == "all_buckets":
+        return all_bucket_cols
     ordered = [bucket_column_name(label) for label in LABEL_NAMES]
     return [col for col in ordered if col in df.columns]
 
 
-def build_model_matrix(df: pd.DataFrame) -> pd.DataFrame:
+def build_model_matrix(df: pd.DataFrame, feature_set: FeatureSet = DEFAULT_FEATURE_SET) -> pd.DataFrame:
     numeric_cols = get_numeric_feature_columns(df)
-    bucket_cols = get_bucket_feature_columns(df)
+    bucket_cols = get_bucket_feature_columns(df, feature_set=feature_set)
 
     frames = []
     if numeric_cols:
@@ -85,18 +94,19 @@ def build_model_matrix(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_features_for_inference(feat_df: pd.DataFrame, checkpoint: dict[str, Any]) -> pd.DataFrame:
-    X = build_model_matrix(feat_df)
-    for col in checkpoint["feature_columns"]:
-        if col not in X.columns:
-            X[col] = 0.0
+    X = build_model_matrix(feat_df, feature_set=checkpoint.get("feature_set", DEFAULT_FEATURE_SET))
+    missing_cols = [col for col in checkpoint["feature_columns"] if col not in X.columns]
+    if missing_cols:
+        missing_df = pd.DataFrame(0.0, index=X.index, columns=missing_cols, dtype=np.float32)
+        X = pd.concat([X, missing_df], axis=1)
     return X[checkpoint["feature_columns"]]
 
 
-def prepare_training_data(features_csv: str, annotations_csv: str):
+def prepare_training_data(features_csv: str, annotations_csv: str, feature_set: FeatureSet = DEFAULT_FEATURE_SET):
     feature_df = pd.read_csv(features_csv)
     annotations_df = pd.read_csv(annotations_csv)
 
-    X_full = build_model_matrix(feature_df)
+    X_full = build_model_matrix(feature_df, feature_set=feature_set)
     if X_full.empty:
         raise ValueError("No model features found in feature table. Expected numeric features and/or bucket_* columns.")
 
@@ -228,6 +238,7 @@ def save_checkpoint(
     valid_target_indices: list[int],
     feature_columns: list[str],
     params: dict[str, Any],
+    feature_set: FeatureSet = DEFAULT_FEATURE_SET,
 ) -> None:
     serialized_models = [model.save_raw() for model in models]
     checkpoint = {
@@ -235,6 +246,7 @@ def save_checkpoint(
         "valid_target_indices": valid_target_indices,
         "feature_columns": feature_columns,
         "params": params,
+        "feature_set": feature_set,
         "label_names": list(LABEL_NAMES),
         "num_labels": NUM_LABELS,
     }
