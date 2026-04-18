@@ -1,5 +1,6 @@
 """Сегментация: UNet + YOLO для получения маски очага."""
 
+from functools import lru_cache
 import numpy as np
 from PIL import Image
 from resizeimage import resizeimage
@@ -18,6 +19,20 @@ def _get_available_device() -> str:
     if torch.backends.mps.is_available():
         return "mps"
     return "cpu"
+
+
+@lru_cache(maxsize=4)
+def _load_yolo_model(yolo_weights: str) -> "YOLO":
+    return YOLO(yolo_weights)
+
+
+@lru_cache(maxsize=8)
+def _load_unet_model(unet_weights: str, device: str) -> "UNet":
+    model = UNet()
+    model.load_state_dict(torch.load(unet_weights, weights_only=True, map_location="cpu"))
+    model.to(device)
+    model.eval()
+    return model
 
 
 class BlockBuilder:
@@ -92,10 +107,7 @@ def get_prediction(image_path: str, unet_weights: str, device: str | None = None
     image = np.rollaxis(image, 2, 0)
     transformed_image = torch.tensor(image, dtype=torch.float32).unsqueeze(0).to(device)
 
-    model = UNet()
-    model.load_state_dict(torch.load(unet_weights, weights_only=True, map_location="cpu"))
-    model.to(device)
-    model.eval()
+    model = _load_unet_model(unet_weights, device)
     with torch.no_grad():
         output = model(transformed_image)
         pred = (torch.sigmoid(output) > 0.5).cpu().numpy()[0, 0]
@@ -127,7 +139,7 @@ def main(
     Возвращает маску в размере исходного изображения.
     """
     device = _get_available_device()
-    model = YOLO(yolo_weights)
+    model = _load_yolo_model(yolo_weights)
     results = model(path_to_image, retina_masks=True, save=False, verbose=False, device=device)
     orig_img = results[0].orig_img
     height, width = orig_img.shape[:2]

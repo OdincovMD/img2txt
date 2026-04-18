@@ -10,6 +10,7 @@ from skimage.feature import local_binary_pattern
 
 RANDOM_STATE = 42
 HUE_PERIOD = 180.0
+MAX_KMEANS_SAMPLES = 5000
 
 
 def _largest_component_mask(mask: np.ndarray) -> np.ndarray:
@@ -75,21 +76,27 @@ def _dominant_hsv_clusters(lesion_pixels_hsv: np.ndarray, n_clusters: int) -> li
     if len(lesion_pixels_hsv) <= n_clusters:
         return lesion_pixels_hsv.astype(int).tolist()
 
-    hues = lesion_pixels_hsv[:, 0].astype(np.float64)
+    sample_pixels = lesion_pixels_hsv
+    if len(sample_pixels) > MAX_KMEANS_SAMPLES:
+        rng = np.random.default_rng(RANDOM_STATE)
+        sample_idx = rng.choice(len(sample_pixels), size=MAX_KMEANS_SAMPLES, replace=False)
+        sample_pixels = sample_pixels[sample_idx]
+
+    hues = sample_pixels[:, 0].astype(np.float64)
     angles = hues * (2 * np.pi / HUE_PERIOD)
     features = np.column_stack([
         np.cos(angles),
         np.sin(angles),
-        lesion_pixels_hsv[:, 1].astype(np.float64) / 255.0,
-        lesion_pixels_hsv[:, 2].astype(np.float64) / 255.0,
+        sample_pixels[:, 1].astype(np.float64) / 255.0,
+        sample_pixels[:, 2].astype(np.float64) / 255.0,
     ])
 
-    kmeans = KMeans(n_clusters=n_clusters, random_state=RANDOM_STATE, n_init=10)
+    kmeans = KMeans(n_clusters=n_clusters, random_state=RANDOM_STATE, n_init=5)
     labels = kmeans.fit_predict(features)
 
     dominant_colors = []
     for cluster_idx in range(n_clusters):
-        cluster_pixels = lesion_pixels_hsv[labels == cluster_idx]
+        cluster_pixels = sample_pixels[labels == cluster_idx]
         if len(cluster_pixels) == 0:
             continue
         dominant_colors.append([
@@ -104,32 +111,39 @@ def _masked_glcm(image_quantized: np.ndarray, mask_bin: np.ndarray, distances: l
     """GLCM that only counts pixel pairs fully inside the lesion mask."""
     glcm = np.zeros((levels, levels, len(distances), len(angles)), dtype=np.float64)
     rows, cols = image_quantized.shape
+    mask_bool = mask_bin.astype(bool)
 
     for d_idx, distance in enumerate(distances):
         for a_idx, angle in enumerate(angles):
             dr = int(round(np.sin(angle) * distance))
             dc = int(round(np.cos(angle) * distance))
 
-            for r in range(rows):
-                rr = r + dr
-                if rr < 0 or rr >= rows:
-                    continue
-                for c in range(cols):
-                    cc = c + dc
-                    if cc < 0 or cc >= cols:
-                        continue
-                    if not (mask_bin[r, c] and mask_bin[rr, cc]):
-                        continue
-                    i = image_quantized[r, c]
-                    j = image_quantized[rr, cc]
-                    glcm[i, j, d_idx, a_idx] += 1.0
-                    glcm[j, i, d_idx, a_idx] += 1.0
+            src_r0 = max(0, -dr)
+            src_r1 = min(rows, rows - dr)
+            src_c0 = max(0, -dc)
+            src_c1 = min(cols, cols - dc)
+            dst_r0 = src_r0 + dr
+            dst_r1 = src_r1 + dr
+            dst_c0 = src_c0 + dc
+            dst_c1 = src_c1 + dc
 
-    for d_idx in range(len(distances)):
-        for a_idx in range(len(angles)):
-            total = glcm[:, :, d_idx, a_idx].sum()
+            if src_r0 >= src_r1 or src_c0 >= src_c1:
+                continue
+
+            src_mask = mask_bool[src_r0:src_r1, src_c0:src_c1]
+            dst_mask = mask_bool[dst_r0:dst_r1, dst_c0:dst_c1]
+            pair_mask = src_mask & dst_mask
+            if not np.any(pair_mask):
+                continue
+
+            src_vals = image_quantized[src_r0:src_r1, src_c0:src_c1][pair_mask]
+            dst_vals = image_quantized[dst_r0:dst_r1, dst_c0:dst_c1][pair_mask]
+            counts = np.bincount(src_vals * levels + dst_vals, minlength=levels * levels)
+            counts = counts.reshape((levels, levels)).astype(np.float64)
+            counts = counts + counts.T
+            total = counts.sum()
             if total > 0:
-                glcm[:, :, d_idx, a_idx] /= total
+                glcm[:, :, d_idx, a_idx] = counts / total
     return glcm
 
 
@@ -398,3 +412,4 @@ def extract_texture_features(image: np.ndarray, mask: np.ndarray) -> dict:
     features["lbp_std"] = float(np.std(lesion_lbp))
     features["lbp_median"] = float(np.median(lesion_lbp))
     return features
+
