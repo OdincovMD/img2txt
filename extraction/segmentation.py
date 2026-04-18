@@ -11,6 +11,15 @@ import torch
 import torch.nn as nn
 
 
+def _get_available_device() -> str:
+    """Выбирает лучший доступный device для инференса."""
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
 class BlockBuilder:
     @staticmethod
     def create_enc_dec_block(in_dim: int, out_dim: int, is_last: bool = False) -> nn.Sequential:
@@ -75,15 +84,17 @@ class UNet(nn.Module):
         return d3
 
 
-def get_prediction(image_path: str, unet_weights: str) -> np.ndarray:
+def get_prediction(image_path: str, unet_weights: str, device: str | None = None) -> np.ndarray:
     """UNet-предсказание маски (fallback при отсутствии YOLO-масок)."""
+    device = device or _get_available_device()
     image = Image.open(image_path)
     image = np.array(resizeimage.resize_cover(image, [256, 256], validate=False))
     image = np.rollaxis(image, 2, 0)
-    transformed_image = torch.tensor(image, dtype=torch.float32).unsqueeze(0)
+    transformed_image = torch.tensor(image, dtype=torch.float32).unsqueeze(0).to(device)
 
     model = UNet()
     model.load_state_dict(torch.load(unet_weights, weights_only=True, map_location="cpu"))
+    model.to(device)
     model.eval()
     with torch.no_grad():
         output = model(transformed_image)
@@ -115,8 +126,9 @@ def main(
     Сегментация: YOLO (основной), UNet (fallback).
     Возвращает маску в размере исходного изображения.
     """
+    device = _get_available_device()
     model = YOLO(yolo_weights)
-    results = model(path_to_image, retina_masks=True, save=False, verbose=False)
+    results = model(path_to_image, retina_masks=True, save=False, verbose=False, device=device)
     orig_img = results[0].orig_img
     height, width = orig_img.shape[:2]
     combined_mask = np.zeros((height, width), dtype=np.uint8)
@@ -128,7 +140,7 @@ def main(
             cv2.fillPoly(instance_mask, [mask_points], 255)
             combined_mask = cv2.bitwise_or(combined_mask, instance_mask)
     else:
-        mask = get_prediction(path_to_image, unet_weights)
+        mask = get_prediction(path_to_image, unet_weights, device=device)
         mask_img = Image.fromarray(mask)
         mask_resized = mask_img.resize((width, height), resample=Image.NEAREST)
         combined_mask = np.array(mask_resized, dtype=np.uint8)
