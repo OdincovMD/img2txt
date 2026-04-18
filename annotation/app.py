@@ -17,7 +17,7 @@ from flask import Flask, jsonify, render_template, request, send_file
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from analysis.feature_metadata import FEATURE_METADATA
-from config.importance_config import LABEL_NAMES
+from bucketing.schema import bucket_column_name
 
 # ---------------------------------------------------------------------------
 # Label metadata: category + Russian description for each of 56 labels
@@ -51,12 +51,13 @@ CATEGORY_DISPLAY = {
 }
 
 CATEGORY_ORDER = ["general", "color.global", "color.local", "shape", "border", "texture"]
+UI_LABEL_NAMES = list(dict.fromkeys([*_COMPOUND_LABELS.keys(), *FEATURE_METADATA.keys()]))
 
 
 def _build_label_meta():
-    """Build {label_key: {category, description}} for all LABEL_NAMES."""
+    """Build {label_key: {category, description}} for all annotation labels."""
     meta = {}
-    for name in LABEL_NAMES:
+    for name in UI_LABEL_NAMES:
         if name in _COMPOUND_LABELS:
             cat, desc = _COMPOUND_LABELS[name]
         elif name in FEATURE_METADATA:
@@ -112,8 +113,20 @@ def _save_annotations():
 
 
 def _get_labels_for_row(idx: int) -> dict:
-    """Parse labels_json for a given row index."""
-    raw = INPUT_DF.iloc[idx].get("labels_json", "{}")
+    """Build label dict from flat bucket_* columns, with legacy labels_json fallback."""
+    row = INPUT_DF.iloc[idx]
+    labels = {}
+
+    for key in UI_LABEL_NAMES:
+        bucket_col = bucket_column_name(key)
+        value = row.get(bucket_col)
+        if pd.notna(value):
+            labels[key] = value
+
+    if labels:
+        return labels
+
+    raw = row.get("labels_json", "{}")
     if isinstance(raw, str):
         try:
             return json.loads(raw)
@@ -158,7 +171,7 @@ def api_image(idx: int):
 
     # Group labels by category
     categories = {}
-    for key in LABEL_NAMES:
+    for key in UI_LABEL_NAMES:
         value = labels.get(key)
         if value is None:
             continue
@@ -258,7 +271,7 @@ def main():
     global INPUT_DF, OUTPUT_PATH
 
     parser = argparse.ArgumentParser(description="Annotation mini-app for important features")
-    parser.add_argument("--csv", required=True, help="Path to bucketed features CSV (needs image_path + labels_json)")
+    parser.add_argument("--csv", required=True, help="Path to features CSV (needs image_path + bucket_* columns)")
     parser.add_argument("--output", default="annotations.csv", help="Output CSV path (default: annotations.csv)")
     parser.add_argument("--port", type=int, default=5050, help="Port (default: 5050)")
     args = parser.parse_args()
@@ -276,8 +289,9 @@ def main():
     if "image_path" not in INPUT_DF.columns:
         print("Error: CSV must have 'image_path' column")
         sys.exit(1)
-    if "labels_json" not in INPUT_DF.columns:
-        print("Error: CSV must have 'labels_json' column")
+    has_bucket_columns = any(col.startswith("bucket_") for col in INPUT_DF.columns)
+    if not has_bucket_columns and "labels_json" not in INPUT_DF.columns:
+        print("Error: CSV must have either bucket_* columns or legacy 'labels_json'")
         sys.exit(1)
 
     _load_annotations()
