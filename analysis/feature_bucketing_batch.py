@@ -5,7 +5,7 @@ Input: DataFrame with features (from feature_extraction_batch)
 Output: DataFrame with added labels and features_json columns
 """
 
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 import json
 import pandas as pd
 from tqdm import tqdm
@@ -17,7 +17,6 @@ from config.importance_config import ACTIVE_LABELS
 
 def bucket_features_batch(
     df: pd.DataFrame,
-    features_col: str = 'features_json',
     verbose: bool = True,
 ) -> pd.DataFrame:
     """
@@ -25,7 +24,6 @@ def bucket_features_batch(
 
     Args:
         df: DataFrame with feature columns (numeric values)
-        features_col: Name of column containing features_json (if exists)
         verbose: Show progress bar
 
     Returns:
@@ -44,7 +42,7 @@ def bucket_features_batch(
         row_dict = row_tuple._asdict()
 
         # Extract numeric features from row
-        features_dict = _extract_numeric_features(row_dict)
+        features_dict = _extract_features(row_dict)
 
         # Apply threshold rules (вычисляются все признаки)
         all_labels = features_to_labels(features_dict)
@@ -70,54 +68,17 @@ def bucket_features_batch(
     return df
 
 
-def _extract_numeric_features(row_dict: Dict[str, Any]) -> Dict[str, float]:
-    """
-    Extract numeric feature values from a row dict.
-    Handles:
-    - Direct numeric columns
-    - features_json (dict of dicts)
-    - features_dict
-    """
+def _extract_features(row_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract feature values from a row dict (direct columns from Step 1)."""
     features = {}
-
-    # First, try to extract from features_json (structured format)
-    if 'features_json' in row_dict:
-        features_json = row_dict['features_json']
-        if isinstance(features_json, str):
-            try:
-                features_json = json.loads(features_json)
-            except:
-                features_json = {}
-        if isinstance(features_json, dict):
-            features.update(_flatten_features_json(features_json))
-
-    # Then, extract numeric columns directly (overwrites if duplicates)
-    for col_name, value in row_dict.items():
-        if col_name in FEATURE_ROUTING:
-            if isinstance(value, (int, float)) and not pd.isna(value):
-                features[col_name] = float(value)
-
+    for key in FEATURE_ROUTING:
+        value = row_dict.get(key)
+        if isinstance(value, (int, float)) and not pd.isna(value):
+            features[key] = float(value)
+        elif isinstance(value, (list, tuple)):
+            # dominant_colors_lesion и подобные нечисловые признаки
+            features[key] = value
     return features
-
-
-def _flatten_features_json(features_json: Dict[str, Any]) -> Dict[str, float]:
-    """
-    Flatten nested features_json structure into flat dict of numeric values.
-    """
-    flat = {}
-
-    def flatten_dict(d, parent_key=''):
-        for k, v in d.items():
-            if isinstance(v, dict):
-                flatten_dict(v, parent_key)
-            elif isinstance(v, (int, float)) and not pd.isna(v):
-                flat[k] = float(v)
-            elif isinstance(v, (list, tuple)):
-                # Skip lists/tuples (like dominant_colors)
-                pass
-
-    flatten_dict(features_json)
-    return flat
 
 
 def _organize_features_structure(features_dict: Dict[str, float]) -> Dict[str, Dict]:

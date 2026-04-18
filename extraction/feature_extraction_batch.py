@@ -20,7 +20,7 @@ from core.features import (
     extract_texture_features,
 )
 from core.segmentation import main as segment_lesion
-from config.config import FEATURE_ROUTING, _safe_number
+from config.config import FEATURE_ROUTING
 
 
 def images_to_df(
@@ -68,21 +68,16 @@ def _build_features_json(features_dict: Dict[str, Any]) -> str:
         "border": {},
         "texture": {},
     }
-    for key, v in features_dict.items():
+    for key, value in features_dict.items():
         if key not in FEATURE_ROUTING:
             continue
-        value = _safe_number(v)
         block, nicename, unit = FEATURE_ROUTING[key]
-        if block == "color.local":
-            features_tree["color"]["local"][key] = [nicename, value, unit]
-        elif block == "color.global":
-            features_tree["color"]["global"][key] = [nicename, value, unit]
-        elif block == "shape":
-            features_tree["shape"][key] = [nicename, value, unit]
-        elif block == "border":
-            features_tree["border"][key] = [nicename, value, unit]
-        else:
-            features_tree["texture"][key] = [nicename, value, unit]
+        entry = [nicename, value, unit]
+        parts = block.split(".")
+        target = features_tree
+        for part in parts:
+            target = target[part]
+        target[key] = entry
     return json.dumps(features_tree, ensure_ascii=False)
 
 
@@ -102,7 +97,7 @@ def _process_row(
             'status': 'success',
         }
         for key in FEATURE_ROUTING:
-            result[key] = _safe_number(features_dict.get(key))
+            result[key] = features_dict.get(key)
         return result
 
     except Exception as e:

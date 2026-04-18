@@ -1,29 +1,19 @@
 """Числа → метки. Пороговые правила (ABCD, CIEDE2000, GLCM)."""
 
-import json
 import math
 from typing import Optional
 
-import pandas as pd
-
+from config.config import FEATURE_ROUTING
 from config.threshold_config import THRESHOLDS, SCALAR, apply_threshold
 
 
 def _get_num(d: dict, key: str) -> Optional[float]:
-    """Извлечь число из значения: число, (val, desc) или [name, val, unit]."""
+    """Извлечь число из словаря."""
     v = d.get(key)
     if v is None:
         return None
     if isinstance(v, (int, float)) and not (isinstance(v, float) and math.isnan(v)):
         return float(v)
-    if isinstance(v, (list, tuple)) and len(v) >= 2:
-        x = v[1]
-        if isinstance(x, (int, float)) and not (isinstance(x, float) and math.isnan(x)):
-            return float(x)
-    if isinstance(v, (list, tuple)) and len(v) >= 1:
-        x = v[0]
-        if isinstance(x, (int, float)) and not (isinstance(x, float) and math.isnan(x)):
-            return float(x)
     return None
 
 
@@ -294,34 +284,13 @@ def features_to_labels(features: dict) -> dict:
     return labels
 
 
-def parse_features_json(features_json) -> dict:
-    """Парсит features_json (str или dict) в плоский словарь feature_name -> value."""
-    if isinstance(features_json, str):
-        try:
-            features_json = json.loads(features_json)
-        except Exception:
-            return {}
-    out = {}
-    blocks = [
-        features_json.get("color", {}).get("local", {}),
-        features_json.get("color", {}).get("global", {}),
-        features_json.get("shape", {}),
-        features_json.get("border", {}),
-        features_json.get("texture", {}),
-    ]
-    for block in blocks:
-        if not isinstance(block, dict):
-            continue
-        for k, v in block.items():
-            val = v[1] if isinstance(v, (list, tuple)) and len(v) >= 2 else v
-            out[k] = val
-    return out
-
-
-def row_to_labels(row) -> dict:
-    """Для строки df с колонкой features_json возвращает словарь меток."""
-    raw = row.get("features_json", {})
-    if pd.isna(raw) or raw is None or raw == "":
-        return features_to_labels({})
-    feats = parse_features_json(raw)
-    return features_to_labels(feats)
+def row_to_labels(row_dict: dict) -> dict:
+    """Для словаря строки df возвращает словарь меток."""
+    features = {}
+    for key in FEATURE_ROUTING:
+        value = row_dict.get(key)
+        if isinstance(value, (int, float)) and not (isinstance(value, float) and math.isnan(value)):
+            features[key] = float(value)
+        elif isinstance(value, (list, tuple)):
+            features[key] = value
+    return features_to_labels(features)

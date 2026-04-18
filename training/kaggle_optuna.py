@@ -70,13 +70,15 @@ def _safe_col(df, col, default=0.0):
 
 
 def _palette_variety(raw):
-    """Compute palette variety from dominant_colors_lesion JSON."""
-    if pd.isna(raw) or not isinstance(raw, str):
+    """Compute palette variety from dominant_colors_lesion (list or JSON string)."""
+    if raw is None or (isinstance(raw, float) and pd.isna(raw)):
         return 1.0
-    try:
-        colors = json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        return 1.0
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return 1.0
+    colors = raw
     if not isinstance(colors, list) or len(colors) == 0:
         return 1.0
     hues = []

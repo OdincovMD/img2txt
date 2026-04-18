@@ -1,10 +1,5 @@
 """Конфигурация маршрутизации признаков."""
 
-import json
-from typing import Any, Optional
-
-import numpy as np
-
 FEATURE_ROUTING = {
     "delta_H_center_periphery": ("color.local", "Δ оттенка центр↔периферия (H)", "deg"),
     "delta_S_center_periphery": ("color.local", "Δ насыщенности центр↔периферия (S)", "S_8bit"),
@@ -56,14 +51,3 @@ FEATURE_ROUTING = {
     "lbp_std": ("texture", "LBP-стандартное отклонение", "abs"),
     "lbp_median": ("texture", "LBP-медиана", "abs"),
 }
-
-
-def _safe_number(x: Any) -> Optional[float]:
-    """Извлечь число из значения (число, кортеж, список)."""
-    if isinstance(x, (int, float, np.number)):
-        return float(x)
-    if isinstance(x, (list, tuple)) and x:
-        v = x[0]
-        if isinstance(v, (int, float, np.number)):
-            return float(v)
-    return None
