@@ -157,7 +157,7 @@ def train_final_mlp_from_study(
     return metadata
 
 
-def main() -> None:
+def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Optuna search for MLP importance model")
     parser.add_argument("--features-csv", default=DEFAULT_FEATURES_CSV)
     parser.add_argument("--annotations-csv", default=DEFAULT_ANNOTATIONS_CSV)
@@ -166,7 +166,12 @@ def main() -> None:
     parser.add_argument("--n-splits", type=int, default=5)
     parser.add_argument("--checkpoint-path", default=str(DEFAULT_MLP_CHECKPOINT_PATH))
     parser.add_argument("--skip-final-train", action="store_true")
-    args = parser.parse_args()
+    return parser
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = build_arg_parser()
+    args = parser.parse_args(argv)
 
     study, trials_df = optimize_mlp(
         features_csv=args.features_csv,
