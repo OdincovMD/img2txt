@@ -91,7 +91,7 @@ Multi-label ranking: по изображению (RGB, опционально + 
 - **Реализация:**
   - `ACTIVE_LABELS` (frozenset, 24 ключа) добавлен в [config/importance_config.py](../config/importance_config.py).
   - `LABEL_NAMES` теперь автоматически строится как `[l for l in _ALL_LABEL_NAMES if l in ACTIVE_LABELS]` → порядок сохранён, `NUM_LABELS=24`.
-  - В [analysis/feature_bucketing_batch.py](../analysis/feature_bucketing_batch.py) `features_to_labels()` по-прежнему вычисляет все метки; фильтрация происходит одной строкой после вызова — вычислительный код не удалён.
+  - Bucketing для pipeline теперь живет отдельно в [bucketing/feature_bucketing_batch.py](../bucketing/feature_bucketing_batch.py): на вход идет плоский `DataFrame` с числовыми признаками, на выходе добавляются только `bucket_*` колонки.
   - В тетрадке добавлены ячейки анализа (бар-чарт, value distribution) и фильтрации аннотаций → `annotations_filtered.csv`.
 - **Частоты активных 24 признаков:** min 10.8% (`texture`), max 85.8% (`color_distance_euclidean`).
 - **Ожидание:** снижение NUM_LABELS 55→24 должно дать +3-5 pp согласно гипотезе 5.2. Результат будет зафиксирован после тренировочного рана.
@@ -288,9 +288,9 @@ Multi-label ranking: по изображению (RGB, опционально + 
 **Ограничение:** пороги фиксированные, не адаптируются к домену (кожа разных типов, разные дерматоскопы). Потенциальный путь улучшения — адаптивная бакетизация по квантилям датасета, но это сломает воспроизводимость между запусками.
 
 #### Публичное API
-- `features_to_labels(features: dict) -> dict` — один образец.
-- `row_to_labels(row)` — обёртка для `df.apply`.
-- `bucket_features_batch(df)` — батчевый вход, добавляет колонки `labels`, `features_organized`, `labels_json`.
+- `bucket_feature_values(features: dict) -> dict[str, str]` — один образец, возвращает скалярные бакеты.
+- `row_to_labels(row)` — обёртка для преобразования строки DataFrame в скалярные бакеты.
+- `bucket_features_batch(df)` — батчевый вход, добавляет плоские `bucket_*` колонки.
 
 ---
 
@@ -304,7 +304,7 @@ Multi-label ranking: по изображению (RGB, опционально + 
 #### Два сигнала
 
 **1. Робастный z-score по датасету**
-Для каждого скалярного признака `k ∈ LABEL_NAMES ∩ FEATURE_ROUTING` считается:
+Для каждого скалярного признака `k ∈ LABEL_NAMES ∩ FEATURE_METADATA` считается:
 ```
 z_k(i) = (x_k(i) - median_k) / (MAD_k + eps)
 ```
@@ -355,7 +355,7 @@ z_k(i) = (x_k(i) - median_k) / (MAD_k + eps)
 - `max_new_tokens=256` — достаточно для 3-5 предложений клинического стиля.
 
 #### Интеграция с Шагом 3
-Вход — список `important_labels` из Шага 3 (уже отфильтрованный top-k). Функция `_parse_feature_entries` раскрывает `"feature:value"` через `FEATURE_ROUTING`, получая человекочитаемое русское описание признака.
+Вход — список `important_labels` из Шага 3 (уже отфильтрованный top-k). Функция `_parse_feature_entries` раскрывает `"feature:value"` через `FEATURE_METADATA`, получая человекочитаемое русское описание признака.
 
 #### Публичное API
 `generate_descriptions_batch(df, classification_col="classification", ...)` — добавляет колонку `description`. Graceful fallback если `transformers` не установлен или при ошибке генерации.
@@ -371,8 +371,8 @@ Flask + vanilla HTML/JS/CSS. Single-page app. Без фреймворков, б�
 
 #### Источники данных для UI
 - `LABEL_NAMES` из [config/importance_config.py](../config/importance_config.py) — словарь 56 меток.
-- `FEATURE_ROUTING` из [config/config.py](../config/config.py) — даёт категорию и русское описание для простых признаков.
-- `_COMPOUND_LABELS` в [annotation/app.py](../annotation/app.py) — маппинг категорий и русских названий для составных меток (asymmetry, borders, palette, и т.д.), которые не входят в `FEATURE_ROUTING`.
+- `FEATURE_METADATA` из [analysis/feature_metadata.py](../analysis/feature_metadata.py) — даёт категорию и русское описание для простых признаков.
+- `_COMPOUND_LABELS` в [annotation/app.py](../annotation/app.py) — маппинг категорий и русских названий для составных меток (asymmetry, borders, palette, и т.д.), которые не входят в `FEATURE_METADATA`.
 
 #### UI-решения
 - Метки сгруппированы по 6 категориям (Общие, Цвет глобальный, Цвет локальный, Форма, Граница, Текстура).
@@ -401,11 +401,13 @@ python annotation/app.py --csv features_dataset_bucket.csv --output annotations.
 
 | Файл | Содержимое |
 |---|---|
-| [config/config.py](../config/config.py) | `FEATURE_ROUTING: Dict[str, Tuple[category, russian_name, unit]]` — регистр 60+ признаков. Источник истины для «что вообще есть в системе». |
+| [analysis/feature_metadata.py](../analysis/feature_metadata.py) | `FEATURE_METADATA: Dict[str, Tuple[category, russian_name, unit]]` — человекочитаемый регистр признаков для анализа/UI. |
+| [extraction/feature_schema.py](../extraction/feature_schema.py) | `FEATURE_COLUMNS: Tuple[str, ...]` — источник истины для списка raw-признаков extraction-слоя. |
+| [bucketing/schema.py](../bucketing/schema.py) | `BUCKET_PREFIX` и `bucket_column_name()` — naming helper для pipeline bucket-колонок. |
 | [config/threshold_config.py](../config/threshold_config.py) | `THRESHOLDS: Dict[str, List[Tuple[threshold, label]]]` + `SCALAR: Dict[str, float]` для составных правил. Источник истины для Шага 2. |
 | [config/importance_config.py](../config/importance_config.py) | `LABEL_NAMES: List[str]` (56 меток), `NUM_LABELS`, `LABEL_TO_IDX`, `expert_string_to_label_key(s)`. Источник истины для Шага 3. |
 
-Все три конфига связаны: `LABEL_NAMES ⊇ ключи составных правил + подмножество FEATURE_ROUTING`. При изменении словаря меток нужно синхронизировать все три + перегенерить бакетизированный датасет.
+Эти слои связаны так: `LABEL_NAMES ⊇ ключи составных правил + подмножество FEATURE_METADATA`, а raw numeric columns задаются `FEATURE_COLUMNS`. При изменении словаря меток нужно синхронизировать bucketing, metadata и при необходимости extraction schema.
 
 ---
 

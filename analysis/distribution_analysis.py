@@ -20,7 +20,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from config.config import FEATURE_ROUTING
+from analysis.feature_metadata import FEATURE_METADATA
+from bucketing.schema import BUCKET_PREFIX
 from config.threshold_config import THRESHOLDS, SCALAR, INF
 
 # Признаки, для которы�� пороги задаются через THRESHOLDS (интервальные)
@@ -81,14 +82,14 @@ def _suggested_thresholds(values: np.ndarray, n_buckets: int = 3) -> list:
 
 def analyze_distributions(df: pd.DataFrame) -> dict:
     """
-    Анализирует распределения всех числовых признаков из FEATURE_ROUTING.
+    Анализирует распределения всех числовых признаков из feature metadata.
 
     Returns:
         dict с ключами — имена признаков, значения — статистик�� + бакеты.
     """
     report = {}
 
-    for feature_name in FEATURE_ROUTING:
+    for feature_name in FEATURE_METADATA:
         if feature_name not in df.columns:
             continue
 
@@ -100,9 +101,9 @@ def analyze_distributions(df: pd.DataFrame) -> dict:
             continue
 
         entry: dict[str, Any] = {
-            "category": FEATURE_ROUTING[feature_name][0],
-            "description": FEATURE_ROUTING[feature_name][1],
-            "unit": FEATURE_ROUTING[feature_name][2],
+            "category": FEATURE_METADATA[feature_name][0],
+            "description": FEATURE_METADATA[feature_name][1],
+            "unit": FEATURE_METADATA[feature_name][2],
             "stats": _feature_stats(values),
         }
 
@@ -133,53 +134,28 @@ def analyze_distributions(df: pd.DataFrame) -> dict:
 
 def analyze_label_distribution(df: pd.DataFrame) -> dict:
     """
-    Анализирует распределение категориальных меток (после bucketing).
-    Требует колонку 'labels' (dict) или 'labels_json' (str).
+    Анализирует распределение плоских bucket-колонок (после bucketing).
     """
-    if "labels" not in df.columns and "labels_json" not in df.columns:
+    bucket_columns = sorted(
+        column_name
+        for column_name in df.columns
+        if isinstance(column_name, str) and column_name.startswith(BUCKET_PREFIX)
+    )
+    if not bucket_columns:
         return {}
 
     label_stats = {}
-
-    for _, row in df.iterrows():
-        if "labels" in df.columns and isinstance(row.get("labels"), dict):
-            labels = row["labels"]
-        elif "labels_json" in df.columns and isinstance(row.get("labels_json"), str):
-            try:
-                labels = json.loads(row["labels_json"])
-            except (json.JSONDecodeError, TypeError):
-                continue
-        else:
+    for column_name in bucket_columns:
+        series = df[column_name].dropna().astype(str)
+        if series.empty:
             continue
-
-        for key, value in labels.items():
-            if isinstance(value, dict):
-                # center_periphery и подобные
-                for sub_key, sub_val in value.items():
-                    full_key = f"{key}.{sub_key}"
-                    label_stats.setdefault(full_key, {})
-                    label_stats[full_key][sub_val] = label_stats[full_key].get(sub_val, 0) + 1
-            elif isinstance(value, list):
-                # pigment_inclusions
-                for item in value:
-                    label_stats.setdefault(key, {})
-                    label_stats[key][item] = label_stats[key].get(item, 0) + 1
-                if not value:
-                    label_stats.setdefault(key, {})
-                    label_stats[key]["нет"] = label_stats[key].get("нет", 0) + 1
-            elif isinstance(value, str):
-                label_stats.setdefault(key, {})
-                label_stats[key][value] = label_stats[key].get(value, 0) + 1
-
-    total = len(df)
-    result = {}
-    for key, counts in sorted(label_stats.items()):
-        result[key] = {
-            val: {"count": cnt, "percent": round(cnt / total * 100, 1)}
-            for val, cnt in sorted(counts.items(), key=lambda x: -x[1])
+        counts = series.value_counts()
+        label_stats[column_name] = {
+            value: {"count": int(count), "percent": round(count / len(df) * 100, 1)}
+            for value, count in counts.items()
         }
 
-    return result
+    return dict(sorted(label_stats.items()))
 
 
 # ——————————————————————————————————————————————

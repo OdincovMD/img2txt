@@ -6,42 +6,33 @@ Output: DataFrame with added feature columns
 
 from pathlib import Path
 from typing import Dict, Optional, Union, Any
-import json
 import numpy as np
 import pandas as pd
 import cv2
 from tqdm import tqdm
 
-from core.features import (
+from extraction.features import (
     extract_global_color_features_with_mask,
     extract_local_color_features_with_mask,
     extract_shape_features,
     extract_border_features,
     extract_texture_features,
 )
-from core.segmentation import main as segment_lesion
-from config.config import FEATURE_ROUTING
+from extraction.derived_features import merge_with_composite_features
+from extraction.segmentation import main as segment_lesion
 
 
 def images_to_df(
     image_dir: Union[str, Path],
-    recursive: bool = False,
 ) -> pd.DataFrame:
     """
-    Scan a directory and return a DataFrame with 'image_path', 'image_id', 'filename' columns.
+    Scan a directory and return a DataFrame with 'image_path' column.
     Convenience function to build input for extract_features_batch.
     """
     image_dir = Path(image_dir)
     exts = {".jpg", ".jpeg", ".png", ".bmp"}
-    if recursive:
-        paths = [p for p in image_dir.rglob("*") if p.suffix.lower() in exts and p.is_file()]
-    else:
-        paths = [p for p in image_dir.iterdir() if p.suffix.lower() in exts and p.is_file()]
-
-    return pd.DataFrame([
-        {'image_path': str(p), 'image_id': p.stem, 'filename': p.name}
-        for p in sorted(paths)
-    ])
+    paths = [p for p in image_dir.iterdir() if p.suffix.lower() in exts and p.is_file()]
+    return pd.DataFrame([{"image_path": str(p)} for p in sorted(paths)])
 
 
 def _load_image_bgr(image_path: Union[str, Path]) -> np.ndarray:
@@ -58,27 +49,7 @@ def _extract_features_from_mask(image: np.ndarray, mask: np.ndarray) -> Dict[str
     features.update(extract_shape_features(mask))
     features.update(extract_border_features(mask))
     features.update(extract_texture_features(image, mask))
-    return features
-
-
-def _build_features_json(features_dict: Dict[str, Any]) -> str:
-    features_tree: Dict[str, Any] = {
-        "color": {"local": {}, "global": {}},
-        "shape": {},
-        "border": {},
-        "texture": {},
-    }
-    for key, value in features_dict.items():
-        if key not in FEATURE_ROUTING:
-            continue
-        block, nicename, unit = FEATURE_ROUTING[key]
-        entry = [nicename, value, unit]
-        parts = block.split(".")
-        target = features_tree
-        for part in parts:
-            target = target[part]
-        target[key] = entry
-    return json.dumps(features_tree, ensure_ascii=False)
+    return merge_with_composite_features(features)
 
 
 def _process_row(
@@ -91,14 +62,7 @@ def _process_row(
         image = _load_image_bgr(image_path)
         mask = segment_lesion(str(image_path), yolo_weights, unet_weights)
         features_dict = _extract_features_from_mask(image, mask)
-
-        result = {
-            'features_json': _build_features_json(features_dict),
-            'status': 'success',
-        }
-        for key in FEATURE_ROUTING:
-            result[key] = features_dict.get(key)
-        return result
+        return {"status": "success", **features_dict}
 
     except Exception as e:
         return {'status': 'error', 'error': str(e)}
@@ -123,7 +87,6 @@ def extract_features_batch(
 
     Returns:
         Original df with added columns:
-        - features_json: structured JSON of all features
         - <individual features>: flattened feature values
         - status: 'success' or 'error'
         - error: error message if status == 'error'

@@ -7,7 +7,6 @@
 from config.importance_config import (
     LABEL_NAMES,
     NUM_LABELS,
-    LABEL_TO_IDX,
 )
 
 # Сколько признаков выбираем как «важные» при инференсе

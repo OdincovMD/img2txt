@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from analysis.threshold_rules import row_to_labels
+from bucketing.threshold_rules import row_to_labels
 from config.importance_config import LABEL_NAMES, NUM_LABELS
 from training.kaggle_optuna import build_features_for_inference, load_checkpoint
 
@@ -86,7 +86,7 @@ def rank_features_batch(
     Step 3: Rank features by importance for all rows in df.
 
     Args:
-        df: DataFrame with feature columns and 'labels_json' (from steps 1-2).
+        df: DataFrame with numeric feature columns.
         importance_model_path: Path to XGBoost checkpoint (.pkl).
             If None, 'important_labels' will be empty lists.
         k: Number of top features to select.

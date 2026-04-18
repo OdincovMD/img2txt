@@ -1,6 +1,6 @@
-"""Конфигурация маршрутизации признаков."""
+"""Human-readable metadata for feature analysis and UI layers."""
 
-FEATURE_ROUTING = {
+FEATURE_METADATA = {
     "delta_H_center_periphery": ("color.local", "Δ оттенка центр↔периферия (H)", "deg"),
     "delta_S_center_periphery": ("color.local", "Δ насыщенности центр↔периферия (S)", "S_8bit"),
     "delta_V_center_periphery": ("color.local", "Δ яркости центр↔периферия (V)", "V_8bit"),

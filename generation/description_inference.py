@@ -170,7 +170,7 @@ def _parse_feature_entries(
     important_features: List[str],
 ) -> Dict[str, List[Tuple[str, str]]]:
     """Parse 'feature:value' strings into grouped {category: [(name, clinical_text)]} dict."""
-    from config.config import FEATURE_ROUTING
+    from analysis.feature_metadata import FEATURE_METADATA
 
     grouped: Dict[str, List[Tuple[str, str]]] = {c: [] for c in _CATEGORY_ORDER}
 
@@ -185,7 +185,7 @@ def _parse_feature_entries(
             clinical_text = value_map.get(label_value, label_value)
             grouped.setdefault(category, []).append((rus_name, clinical_text))
         else:
-            routing = FEATURE_ROUTING.get(feature_key)
+            routing = FEATURE_METADATA.get(feature_key)
             if routing:
                 _cat_path, rus_name, _unit = routing
             else:

@@ -16,14 +16,14 @@ from flask import Flask, jsonify, render_template, request, send_file
 # Allow imports from project root
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from config.config import FEATURE_ROUTING
+from analysis.feature_metadata import FEATURE_METADATA
 from config.importance_config import LABEL_NAMES
 
 # ---------------------------------------------------------------------------
 # Label metadata: category + Russian description for each of 56 labels
 # ---------------------------------------------------------------------------
 
-# Compound labels not in FEATURE_ROUTING
+# Compound labels not in feature metadata
 _COMPOUND_LABELS = {
     "asymmetry":          ("general",      "Асимметрия"),
     "borders":            ("border",       "Границы"),
@@ -59,8 +59,8 @@ def _build_label_meta():
     for name in LABEL_NAMES:
         if name in _COMPOUND_LABELS:
             cat, desc = _COMPOUND_LABELS[name]
-        elif name in FEATURE_ROUTING:
-            cat, desc, _unit = FEATURE_ROUTING[name]
+        elif name in FEATURE_METADATA:
+            cat, desc, _unit = FEATURE_METADATA[name]
         else:
             cat, desc = "general", name
         meta[name] = {"category": cat, "description": desc}

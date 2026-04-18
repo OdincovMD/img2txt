@@ -22,3 +22,8 @@ training/checkpoints/
 *.pkl
 *.joblib
 .gitnexus
+weights/
+tests/
+images/
+.codex
+.claude/
