@@ -51,10 +51,15 @@ MLP_WEIGHT_DECAY = 1e-4
 MLP_DROPOUT = 0.3
 
 XgbFeatureSet = Literal["numeric_only", "selected_buckets", "all_buckets"]
+XgbModelType = Literal["xgb", "xgb_classifier_chain"]
+DEFAULT_XGB_MODEL_TYPE: XgbModelType = "xgb"
 
 
-def get_default_xgb_checkpoint_path(feature_set: XgbFeatureSet = DEFAULT_FEATURE_SET) -> Path:
-    return DEFAULT_CHECKPOINT_DIR / f"xgb_importance_{feature_set}.pkl"
+def get_default_xgb_checkpoint_path(
+    feature_set: XgbFeatureSet = DEFAULT_FEATURE_SET,
+    model_type: XgbModelType = DEFAULT_XGB_MODEL_TYPE,
+) -> Path:
+    return DEFAULT_CHECKPOINT_DIR / f"xgb_importance_{model_type}_{feature_set}.pkl"
 
 
 def get_xgb_device() -> str:

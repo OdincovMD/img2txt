@@ -9,7 +9,7 @@ from tqdm import tqdm
 
 from bucketing.schema import bucket_column_name
 from model.config import LABEL_NAMES, NUM_LABELS
-from model.model import build_features_for_inference, load_checkpoint
+from model.model import build_features_for_inference, get_xgb_model_type, load_checkpoint, predict_xgboost_scores
 
 try:
     import xgboost as xgb
@@ -43,11 +43,13 @@ def _top_indices_to_labels(top_indices: List[int], labels_dict: dict[str, str], 
 def _predict_row(row: pd.Series, checkpoint: dict, k: int = 10) -> List[str]:
     labels_dict = _row_labels_from_buckets(row)
     X = build_features_for_inference(pd.DataFrame([row]), checkpoint)
-
-    full_preds = np.zeros(NUM_LABELS)
-    dmat = xgb.DMatrix(X)
-    for model_idx, target_idx in enumerate(checkpoint["valid_target_indices"]):
-        full_preds[target_idx] = checkpoint["models"][model_idx].predict(dmat)[0]
+    full_preds = predict_xgboost_scores(
+        checkpoint["models"],
+        X,
+        checkpoint["valid_target_indices"],
+        model_type=get_xgb_model_type(checkpoint),
+        chain_order=checkpoint.get("chain_order"),
+    )[0]
 
     top_idx = np.argsort(full_preds)[::-1][:k].tolist()
     return _top_indices_to_labels(top_idx, labels_dict, k=k)

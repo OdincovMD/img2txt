@@ -7,6 +7,7 @@ from model.config import (
     DEFAULT_ANNOTATIONS_CSV,
     DEFAULT_FEATURES_CSV,
     DEFAULT_FEATURE_SET,
+    DEFAULT_XGB_MODEL_TYPE,
     OPTUNA_TRIALS,
     get_default_xgb_checkpoint_path,
 )
@@ -15,7 +16,7 @@ from model.model import (
     optimize_xgboost,
     prepare_training_data,
     save_checkpoint,
-    train_xgboost_models,
+    train_xgboost_models_by_type,
 )
 
 
@@ -27,6 +28,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--feature-set",
         default=DEFAULT_FEATURE_SET,
         choices=["numeric_only", "selected_buckets", "all_buckets"],
+    )
+    parser.add_argument(
+        "--model-type",
+        default=DEFAULT_XGB_MODEL_TYPE,
+        choices=["xgb", "xgb_classifier_chain"],
     )
     parser.add_argument("--n-trials", type=int, default=OPTUNA_TRIALS)
     parser.add_argument("--checkpoint-path")
@@ -42,7 +48,7 @@ def main(argv: list[str] | None = None) -> None:
     print("  XGBoost importance model")
     print("=" * 70)
 
-    checkpoint_path = args.checkpoint_path or str(get_default_xgb_checkpoint_path(args.feature_set))
+    checkpoint_path = args.checkpoint_path or str(get_default_xgb_checkpoint_path(args.feature_set, args.model_type))
 
     X_train, X_val, y_train, y_val, feature_columns, valid_target_indices = prepare_training_data(
         args.features_csv,
@@ -57,6 +63,12 @@ def main(argv: list[str] | None = None) -> None:
                 raise RuntimeError(
                     f"Checkpoint feature_set={checkpoint_feature_set!r} does not match "
                     f"requested feature_set={args.feature_set!r}."
+                )
+            checkpoint_model_type = checkpoint.get("model_type", DEFAULT_XGB_MODEL_TYPE)
+            if checkpoint_model_type != args.model_type:
+                raise RuntimeError(
+                    f"Checkpoint model_type={checkpoint_model_type!r} does not match "
+                    f"requested model_type={args.model_type!r}."
                 )
             best_params = checkpoint["params"]
         except Exception as exc:
@@ -75,6 +87,7 @@ def main(argv: list[str] | None = None) -> None:
             valid_target_indices,
             args.n_trials,
             feature_set=args.feature_set,
+            model_type=args.model_type,
         )
 
         print(f"\n{'=' * 70}")
@@ -84,13 +97,14 @@ def main(argv: list[str] | None = None) -> None:
         print(f"Best score: {study.best_value:.4f}")
         best_params = study.best_params
 
-    models, score = train_xgboost_models(
+    models, score, metadata = train_xgboost_models_by_type(
         X_train,
         X_val,
         y_train,
         y_val,
         best_params,
         valid_target_indices,
+        model_type=args.model_type,
     )
     print(f"Final score: {score:.4f}")
 
@@ -101,6 +115,8 @@ def main(argv: list[str] | None = None) -> None:
         feature_columns,
         best_params,
         feature_set=args.feature_set,
+        model_type=args.model_type,
+        chain_order=metadata.get("chain_order"),
     )
     print(f"Checkpoint saved to: {checkpoint_path}")
 

@@ -9,12 +9,13 @@ import numpy as np
 import optuna
 import pandas as pd
 import xgboost as xgb
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import StratifiedKFold, train_test_split
 
 from bucketing.schema import bucket_column_name
 from extraction.derived_features import COMPOSITE_FEATURE_COLUMNS
 from extraction.feature_schema import FEATURE_COLUMNS
 from model.config import (
+    DEFAULT_XGB_MODEL_TYPE,
     DEFAULT_FEATURE_SET,
     EARLY_STOPPING_ROUNDS,
     LABEL_NAMES,
@@ -65,6 +66,7 @@ def get_numeric_feature_columns(df: pd.DataFrame) -> list[str]:
 
 
 FeatureSet = Literal["numeric_only", "selected_buckets", "all_buckets"]
+XgbModelType = Literal["xgb", "xgb_classifier_chain"]
 
 
 def get_bucket_feature_columns(df: pd.DataFrame, feature_set: FeatureSet = DEFAULT_FEATURE_SET) -> list[str]:
@@ -133,13 +135,137 @@ def prepare_training_data(features_csv: str, annotations_csv: str, feature_set: 
     return X_train, X_val, y_train, y_val, X.columns.tolist(), valid_target_indices
 
 
-def evaluate_models(models: list[xgb.Booster], X_val: pd.DataFrame, y_val: np.ndarray, valid_target_indices: list[int]) -> float:
-    full_preds = np.zeros((len(X_val), NUM_LABELS), dtype=np.float32)
-    full_y = np.zeros((len(X_val), NUM_LABELS), dtype=np.float32)
-    dval = xgb.DMatrix(X_val)
+def get_xgb_model_type(checkpoint: dict[str, Any]) -> XgbModelType:
+    model_type = checkpoint.get("model_type", DEFAULT_XGB_MODEL_TYPE)
+    if model_type not in ("xgb", "xgb_classifier_chain"):
+        return DEFAULT_XGB_MODEL_TYPE
+    return model_type
 
+
+def get_chain_feature_name(target_idx: int) -> str:
+    return f"chain_pred__{LABEL_NAMES[target_idx]}"
+
+
+def append_chain_features(
+    X: pd.DataFrame,
+    chain_target_indices: list[int],
+    chain_predictions: list[np.ndarray],
+) -> pd.DataFrame:
+    if not chain_target_indices:
+        return X
+    frame = X.copy()
+    for target_idx, preds in zip(chain_target_indices, chain_predictions):
+        frame[get_chain_feature_name(target_idx)] = np.asarray(preds, dtype=np.float32)
+    return frame
+
+
+def build_xgb_training_params(params: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "objective": "binary:logistic",
+        "eval_metric": "logloss",
+        "max_depth": params["max_depth"],
+        "learning_rate": params["learning_rate"],
+        "reg_lambda": params["reg_lambda"],
+        "reg_alpha": params["reg_alpha"],
+        "subsample": params["subsample"],
+        "colsample_bytree": params["colsample_bytree"],
+        "min_child_weight": params["min_child_weight"],
+        "gamma": params["gamma"],
+        "max_bin": params["max_bin"],
+        "tree_method": "hist",
+        "device": get_xgb_device(),
+        "seed": SEED,
+        "verbosity": 0,
+    }
+
+
+def fit_xgb_booster(
+    X_train: pd.DataFrame,
+    y_train: np.ndarray,
+    X_val: pd.DataFrame,
+    y_val: np.ndarray,
+    params: dict[str, Any],
+) -> xgb.Booster:
+    dtrain = xgb.DMatrix(X_train, label=y_train)
+    dval = xgb.DMatrix(X_val, label=y_val)
+    return xgb.train(
+        build_xgb_training_params(params),
+        dtrain,
+        num_boost_round=params["n_estimators"],
+        evals=[(dval, "val")],
+        early_stopping_rounds=EARLY_STOPPING_ROUNDS,
+        verbose_eval=False,
+    )
+
+
+def build_oof_predictions(
+    X_train: pd.DataFrame,
+    y_train: np.ndarray,
+    params: dict[str, Any],
+) -> np.ndarray:
+    class_counts = np.bincount(y_train.astype(np.int32), minlength=2)
+    min_class_count = int(class_counts.min()) if len(class_counts) == 2 else 0
+    if min_class_count < 2:
+        return np.full(len(X_train), float(y_train.mean()), dtype=np.float32)
+
+    n_splits = min(5, min_class_count)
+    splitter = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=SEED)
+    oof_preds = np.zeros(len(X_train), dtype=np.float32)
+    X_train_reset = X_train.reset_index(drop=True)
+
+    for fold_train_idx, fold_val_idx in splitter.split(X_train_reset, y_train.astype(np.int32)):
+        booster = fit_xgb_booster(
+            X_train_reset.iloc[fold_train_idx],
+            y_train[fold_train_idx],
+            X_train_reset.iloc[fold_val_idx],
+            y_train[fold_val_idx],
+            params,
+        )
+        oof_preds[fold_val_idx] = booster.predict(xgb.DMatrix(X_train_reset.iloc[fold_val_idx]), output_margin=False)
+    return oof_preds
+
+
+def predict_xgboost_scores(
+    models: list[xgb.Booster],
+    X: pd.DataFrame,
+    valid_target_indices: list[int],
+    model_type: XgbModelType = DEFAULT_XGB_MODEL_TYPE,
+    chain_order: list[int] | None = None,
+) -> np.ndarray:
+    full_preds = np.zeros((len(X), NUM_LABELS), dtype=np.float32)
+    if model_type == "xgb_classifier_chain":
+        active_chain = list(chain_order or valid_target_indices)
+        previous_preds: list[np.ndarray] = []
+        for model_idx, target_idx in enumerate(active_chain):
+            chain_features = append_chain_features(X, active_chain[:model_idx], previous_preds)
+            preds = models[model_idx].predict(xgb.DMatrix(chain_features), output_margin=False)
+            full_preds[:, target_idx] = preds
+            previous_preds.append(preds.astype(np.float32))
+        return full_preds
+
+    dmatrix = xgb.DMatrix(X)
     for model_idx, target_idx in enumerate(valid_target_indices):
-        full_preds[:, target_idx] = models[model_idx].predict(dval, output_margin=False)
+        full_preds[:, target_idx] = models[model_idx].predict(dmatrix, output_margin=False)
+    return full_preds
+
+
+def evaluate_models(
+    models: list[xgb.Booster],
+    X_val: pd.DataFrame,
+    y_val: np.ndarray,
+    valid_target_indices: list[int],
+    model_type: XgbModelType = DEFAULT_XGB_MODEL_TYPE,
+    chain_order: list[int] | None = None,
+) -> float:
+    full_preds = predict_xgboost_scores(
+        models,
+        X_val,
+        valid_target_indices,
+        model_type=model_type,
+        chain_order=chain_order,
+    )
+    full_y = np.zeros((len(X_val), NUM_LABELS), dtype=np.float32)
+    for model_idx, target_idx in enumerate(valid_target_indices):
         full_y[:, target_idx] = y_val[:, model_idx]
 
     p10_values, r10_values = [], []
@@ -163,40 +289,77 @@ def train_xgboost_models(
     y_val: np.ndarray,
     params: dict[str, Any],
     valid_target_indices: list[int],
-) -> tuple[list[xgb.Booster], float]:
+) -> tuple[list[xgb.Booster], float, dict[str, Any]]:
+    return train_xgboost_models_by_type(
+        X_train,
+        X_val,
+        y_train,
+        y_val,
+        params,
+        valid_target_indices,
+        model_type=DEFAULT_XGB_MODEL_TYPE,
+    )
+
+
+def train_xgboost_models_by_type(
+    X_train: pd.DataFrame,
+    X_val: pd.DataFrame,
+    y_train: np.ndarray,
+    y_val: np.ndarray,
+    params: dict[str, Any],
+    valid_target_indices: list[int],
+    model_type: XgbModelType = DEFAULT_XGB_MODEL_TYPE,
+) -> tuple[list[xgb.Booster], float, dict[str, Any]]:
+    if model_type == "xgb_classifier_chain":
+        return train_xgb_classifier_chain(X_train, X_val, y_train, y_val, params, valid_target_indices)
+
     models = []
-    xgb_device = get_xgb_device()
 
     for target_idx in range(len(valid_target_indices)):
-        dtrain = xgb.DMatrix(X_train, label=y_train[:, target_idx])
-        dval = xgb.DMatrix(X_val, label=y_val[:, target_idx])
-        booster = xgb.train(
-            {
-                "objective": "binary:logistic",
-                "eval_metric": "logloss",
-                "max_depth": params["max_depth"],
-                "learning_rate": params["learning_rate"],
-                "reg_lambda": params["reg_lambda"],
-                "reg_alpha": params["reg_alpha"],
-                "subsample": params["subsample"],
-                "colsample_bytree": params["colsample_bytree"],
-                "min_child_weight": params["min_child_weight"],
-                "gamma": params["gamma"],
-                "max_bin": params["max_bin"],
-                "tree_method": "hist",
-                "device": xgb_device,
-                "seed": SEED,
-                "verbosity": 0,
-            },
-            dtrain,
-            num_boost_round=params["n_estimators"],
-            evals=[(dval, "val")],
-            early_stopping_rounds=EARLY_STOPPING_ROUNDS,
-            verbose_eval=False,
-        )
+        booster = fit_xgb_booster(X_train, y_train[:, target_idx], X_val, y_val[:, target_idx], params)
         models.append(booster)
 
-    return models, evaluate_models(models, X_val, y_val, valid_target_indices)
+    score = evaluate_models(models, X_val, y_val, valid_target_indices, model_type=model_type)
+    return models, score, {"chain_order": list(valid_target_indices)}
+
+
+def train_xgb_classifier_chain(
+    X_train: pd.DataFrame,
+    X_val: pd.DataFrame,
+    y_train: np.ndarray,
+    y_val: np.ndarray,
+    params: dict[str, Any],
+    valid_target_indices: list[int],
+) -> tuple[list[xgb.Booster], float, dict[str, Any]]:
+    chain_order = list(valid_target_indices)
+    models: list[xgb.Booster] = []
+    train_chain_predictions: list[np.ndarray] = []
+    val_chain_predictions: list[np.ndarray] = []
+
+    for model_idx, target_idx in enumerate(chain_order):
+        previous_targets = chain_order[:model_idx]
+        X_train_step = append_chain_features(X_train, previous_targets, train_chain_predictions)
+        X_val_step = append_chain_features(X_val, previous_targets, val_chain_predictions)
+        y_train_target = y_train[:, model_idx]
+        y_val_target = y_val[:, model_idx]
+
+        train_oof_preds = build_oof_predictions(X_train_step, y_train_target, params)
+        booster = fit_xgb_booster(X_train_step, y_train_target, X_val_step, y_val_target, params)
+        val_preds = booster.predict(xgb.DMatrix(X_val_step), output_margin=False).astype(np.float32)
+
+        models.append(booster)
+        train_chain_predictions.append(train_oof_preds)
+        val_chain_predictions.append(val_preds)
+
+    score = evaluate_models(
+        models,
+        X_val,
+        y_val,
+        valid_target_indices,
+        model_type="xgb_classifier_chain",
+        chain_order=chain_order,
+    )
+    return models, score, {"chain_order": chain_order}
 
 
 def suggest_xgb_params(trial: optuna.Trial, feature_set: FeatureSet = DEFAULT_FEATURE_SET) -> dict[str, Any]:
@@ -235,10 +398,19 @@ def optimize_xgboost(
     valid_target_indices: list[int],
     n_trials: int,
     feature_set: FeatureSet = DEFAULT_FEATURE_SET,
+    model_type: XgbModelType = DEFAULT_XGB_MODEL_TYPE,
 ) -> optuna.study.Study:
     def objective(trial: optuna.Trial) -> float:
         params = suggest_xgb_params(trial, feature_set=feature_set)
-        _, score = train_xgboost_models(X_train, X_val, y_train, y_val, params, valid_target_indices)
+        _, score, _ = train_xgboost_models_by_type(
+            X_train,
+            X_val,
+            y_train,
+            y_val,
+            params,
+            valid_target_indices,
+            model_type=model_type,
+        )
         return score
 
     study = optuna.create_study(direction="maximize")
@@ -253,6 +425,8 @@ def save_checkpoint(
     feature_columns: list[str],
     params: dict[str, Any],
     feature_set: FeatureSet = DEFAULT_FEATURE_SET,
+    model_type: XgbModelType = DEFAULT_XGB_MODEL_TYPE,
+    chain_order: list[int] | None = None,
 ) -> None:
     serialized_models = [model.save_raw() for model in models]
     checkpoint = {
@@ -261,6 +435,8 @@ def save_checkpoint(
         "feature_columns": feature_columns,
         "params": params,
         "feature_set": feature_set,
+        "model_type": model_type,
+        "chain_order": list(chain_order or valid_target_indices),
         "label_names": list(LABEL_NAMES),
         "num_labels": NUM_LABELS,
     }
@@ -281,5 +457,7 @@ def load_checkpoint(path: str | Path) -> dict[str, Any]:
         models.append(model)
 
     checkpoint["models"] = models
+    checkpoint.setdefault("model_type", DEFAULT_XGB_MODEL_TYPE)
+    checkpoint.setdefault("chain_order", list(checkpoint["valid_target_indices"]))
     del checkpoint["models_raw"]
     return checkpoint
