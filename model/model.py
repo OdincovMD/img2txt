@@ -199,18 +199,31 @@ def train_xgboost_models(
     return models, evaluate_models(models, X_val, y_val, valid_target_indices)
 
 
-def suggest_xgb_params(trial: optuna.Trial) -> dict[str, Any]:
+def suggest_xgb_params(trial: optuna.Trial, feature_set: FeatureSet = DEFAULT_FEATURE_SET) -> dict[str, Any]:
+    shared_params = {
+        "learning_rate": trial.suggest_float("learning_rate", 3e-3, 0.08, log=True),
+        "n_estimators": trial.suggest_int("n_estimators", 500, 1600),
+        "reg_lambda": trial.suggest_float("reg_lambda", 0.5, 6.0),
+        "reg_alpha": trial.suggest_float("reg_alpha", 1e-4, 0.3, log=True),
+        "subsample": trial.suggest_float("subsample", 0.6, 1.0),
+        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.55, 1.0),
+        "min_child_weight": trial.suggest_int("min_child_weight", 1, 8),
+        "gamma": trial.suggest_float("gamma", 0.0, 5.0),
+        "max_bin": trial.suggest_categorical("max_bin", [128, 256, 512]),
+    }
+    if feature_set == "numeric_only":
+        return {
+            **shared_params,
+            "max_depth": trial.suggest_int("max_depth", 3, 6),
+        }
+    if feature_set == "all_buckets":
+        return {
+            **shared_params,
+            "max_depth": trial.suggest_int("max_depth", 5, 9),
+        }
     return {
-        "max_depth": trial.suggest_int("max_depth", 5, 7),
-        "learning_rate": trial.suggest_float("learning_rate", 5e-3, 0.04, log=True),
-        "n_estimators": trial.suggest_int("n_estimators", 800, 1400),
-        "reg_lambda": trial.suggest_float("reg_lambda", 1.0, 4.0),
-        "reg_alpha": trial.suggest_float("reg_alpha", 1e-3, 0.1, log=True),
-        "subsample": trial.suggest_float("subsample", 0.65, 0.85),
-        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.7, 0.95),
-        "min_child_weight": trial.suggest_int("min_child_weight", 1, 5),
-        "gamma": trial.suggest_float("gamma", 2.5, 4.5),
-        "max_bin": trial.suggest_categorical("max_bin", [128, 256]),
+        **shared_params,
+        "max_depth": trial.suggest_int("max_depth", 4, 7),
     }
 
 
@@ -221,9 +234,10 @@ def optimize_xgboost(
     y_val: np.ndarray,
     valid_target_indices: list[int],
     n_trials: int,
+    feature_set: FeatureSet = DEFAULT_FEATURE_SET,
 ) -> optuna.study.Study:
     def objective(trial: optuna.Trial) -> float:
-        params = suggest_xgb_params(trial)
+        params = suggest_xgb_params(trial, feature_set=feature_set)
         _, score = train_xgboost_models(X_train, X_val, y_train, y_val, params, valid_target_indices)
         return score
 

@@ -1,7 +1,7 @@
 """Configuration for importance models."""
 
 from pathlib import Path
-from typing import List
+from typing import List, Literal
 
 import torch
 
@@ -39,7 +39,7 @@ OPTUNA_TRIALS = 30
 EARLY_STOPPING_ROUNDS = 50
 DEFAULT_FEATURES_CSV = "features_with_bucket.csv"
 DEFAULT_ANNOTATIONS_CSV = "annotations.csv"
-DEFAULT_CHECKPOINT_PATH = Path("model/checkpoints/xgb_importance.pkl")
+DEFAULT_CHECKPOINT_DIR = Path("model/checkpoints")
 DEFAULT_FEATURE_SET = "selected_buckets"
 DEFAULT_MLP_CHECKPOINT_PATH = Path("model/checkpoints/mlp_importance.pt")
 DEFAULT_MLP_FEATURE_SET = "numeric_only"
@@ -49,6 +49,12 @@ MLP_PATIENCE = 20
 MLP_LEARNING_RATE = 1e-3
 MLP_WEIGHT_DECAY = 1e-4
 MLP_DROPOUT = 0.3
+
+XgbFeatureSet = Literal["numeric_only", "selected_buckets", "all_buckets"]
+
+
+def get_default_xgb_checkpoint_path(feature_set: XgbFeatureSet = DEFAULT_FEATURE_SET) -> Path:
+    return DEFAULT_CHECKPOINT_DIR / f"xgb_importance_{feature_set}.pkl"
 
 
 def get_xgb_device() -> str:

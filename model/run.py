@@ -5,10 +5,10 @@ import argparse
 
 from model.config import (
     DEFAULT_ANNOTATIONS_CSV,
-    DEFAULT_CHECKPOINT_PATH,
     DEFAULT_FEATURES_CSV,
     DEFAULT_FEATURE_SET,
     OPTUNA_TRIALS,
+    get_default_xgb_checkpoint_path,
 )
 from model.model import (
     load_checkpoint,
@@ -29,7 +29,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         choices=["numeric_only", "selected_buckets", "all_buckets"],
     )
     parser.add_argument("--n-trials", type=int, default=OPTUNA_TRIALS)
-    parser.add_argument("--checkpoint-path", default=str(DEFAULT_CHECKPOINT_PATH))
+    parser.add_argument("--checkpoint-path")
     parser.add_argument("--skip-optuna", action="store_true")
     return parser
 
@@ -42,6 +42,8 @@ def main(argv: list[str] | None = None) -> None:
     print("  XGBoost importance model")
     print("=" * 70)
 
+    checkpoint_path = args.checkpoint_path or str(get_default_xgb_checkpoint_path(args.feature_set))
+
     X_train, X_val, y_train, y_val, feature_columns, valid_target_indices = prepare_training_data(
         args.features_csv,
         args.annotations_csv,
@@ -49,11 +51,17 @@ def main(argv: list[str] | None = None) -> None:
     )
     if args.skip_optuna:
         try:
-            checkpoint = load_checkpoint(args.checkpoint_path)
+            checkpoint = load_checkpoint(checkpoint_path)
+            checkpoint_feature_set = checkpoint.get("feature_set", DEFAULT_FEATURE_SET)
+            if checkpoint_feature_set != args.feature_set:
+                raise RuntimeError(
+                    f"Checkpoint feature_set={checkpoint_feature_set!r} does not match "
+                    f"requested feature_set={args.feature_set!r}."
+                )
             best_params = checkpoint["params"]
         except Exception as exc:
             raise RuntimeError(
-                f"Could not load params from checkpoint {args.checkpoint_path!r}. "
+                f"Could not load params from checkpoint {checkpoint_path!r}. "
                 "Run without --skip-optuna or pass a valid checkpoint."
             ) from exc
         print("\nSkipping Optuna, using params from checkpoint:")
@@ -66,6 +74,7 @@ def main(argv: list[str] | None = None) -> None:
             y_val,
             valid_target_indices,
             args.n_trials,
+            feature_set=args.feature_set,
         )
 
         print(f"\n{'=' * 70}")
@@ -86,14 +95,14 @@ def main(argv: list[str] | None = None) -> None:
     print(f"Final score: {score:.4f}")
 
     save_checkpoint(
-        args.checkpoint_path,
+        checkpoint_path,
         models,
         valid_target_indices,
         feature_columns,
         best_params,
         feature_set=args.feature_set,
     )
-    print(f"Checkpoint saved to: {args.checkpoint_path}")
+    print(f"Checkpoint saved to: {checkpoint_path}")
 
 
 if __name__ == "__main__":
