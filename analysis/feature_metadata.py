@@ -50,4 +50,9 @@ FEATURE_METADATA = {
     "lbp_mean": ("texture", "LBP-среднее", "abs"),
     "lbp_std": ("texture", "LBP-стандартное отклонение", "abs"),
     "lbp_median": ("texture", "LBP-медиана", "abs"),
+    "asymmetry_agg": ("shape", "Асимметрия (суммарная дельта H/S/V)", "abs"),
+    "palette_variety": ("color.global", "Разнообразие палитры (цветовые кластеры)", "abs"),
+    "elongation_score": ("shape", "Индекс вытянутости", "ratio_0_1"),
+    "color_homogeneity_agg": ("color.global", "Агрегированная однородность цвета", "abs"),
+    "lobulation_score": ("border", "Индекс дольчатости", "ratio_0_1"),
 }

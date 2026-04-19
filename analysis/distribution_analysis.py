@@ -2,7 +2,7 @@
 Анализ распределений числовых признаков и оценка текущих порогов.
 
 Использование:
-    python -m analysis.distribution_analysis --csv features_dataset_bucket.csv
+    python -m analysis.distribution_analysis --csv features.csv
     python -m analysis.distribution_analysis --csv features.csv --output analysis/results
 
 Результаты:
@@ -23,9 +23,6 @@ import pandas as pd
 from analysis.feature_metadata import FEATURE_METADATA
 from bucketing.schema import BUCKET_PREFIX
 from config.threshold_config import THRESHOLDS, SCALAR, INF
-
-# Признаки, для которы�� пороги задаются через THRESHOLDS (интервальные)
-THRESHOLD_FEATURES = set(THRESHOLDS.keys()) - {"asymmetry_agg", "palette_variety"}
 
 DEFAULT_OUTPUT = Path("analysis/results")
 
@@ -295,6 +292,12 @@ def analyze_scalar_thresholds(df: pd.DataFrame) -> dict:
         "pigmentation_dark_high": "percent_dark_pixels",
         "pigmentation_dark_mid": "percent_dark_pixels",
         "pigment_inclusion_threshold": "percent_red_pixels",
+        "color_homogeneity_agg_high": "color_homogeneity_agg",
+        "color_homogeneity_agg_mid": "color_homogeneity_agg",
+        "elongation_score_low": "elongation_score",
+        "elongation_score_mid": "elongation_score",
+        "lobulation_score_low": "lobulation_score",
+        "lobulation_score_mid": "lobulation_score",
     }
 
     for scalar_name, threshold_value in SCALAR.items():
