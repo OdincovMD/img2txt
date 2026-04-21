@@ -107,6 +107,44 @@ def calculate_topk_distribution(scores: np.ndarray, k: int = 10) -> np.ndarray:
     return counts / max(len(scores) * k, 1)
 
 
+def calculate_label_report(scores: np.ndarray, full_y: np.ndarray, k: int = 10) -> list[dict[str, Any]]:
+    selected_counts = np.zeros(scores.shape[1], dtype=np.float32)
+    hit_counts = np.zeros(scores.shape[1], dtype=np.float32)
+    positive_counts = full_y.sum(axis=0).astype(np.float32)
+
+    for row_idx in range(len(scores)):
+        top_indices = np.argsort(scores[row_idx])[-k:]
+        true_indices = set(np.where(full_y[row_idx] > 0)[0].tolist())
+        for target_idx in top_indices:
+            selected_counts[target_idx] += 1
+            if target_idx in true_indices:
+                hit_counts[target_idx] += 1
+
+    total_positive = max(float(positive_counts.sum()), 1.0)
+    total_selected = max(float(len(scores) * k), 1.0)
+    report = []
+    for target_idx, label in enumerate(LABEL_NAMES):
+        positives = float(positive_counts[target_idx])
+        selected = float(selected_counts[target_idx])
+        hits = float(hit_counts[target_idx])
+        true_share = positives / total_positive
+        selected_share = selected / total_selected
+        report.append(
+            {
+                "label": label,
+                "positives": int(positives),
+                "selected": int(selected),
+                "hits": int(hits),
+                "true_share": true_share,
+                "selected_share": selected_share,
+                "share_delta": selected_share - true_share,
+                "recall_at_k": hits / positives if positives else 0.0,
+                "precision_when_selected": hits / selected if selected else 0.0,
+            }
+        )
+    return report
+
+
 def get_numeric_feature_columns(df: pd.DataFrame) -> list[str]:
     ordered = [*FEATURE_COLUMNS, *COMPOSITE_FEATURE_COLUMNS]
     return [col for col in ordered if col in df.columns and pd.api.types.is_numeric_dtype(df[col])]
@@ -344,6 +382,7 @@ def calibrate_xgboost_label_bias(
     base_bias = np.clip(base_bias, -3.0, 3.0).astype(np.float32)
 
     baseline_metrics = evaluate_score_matrix(base_scores, full_y, k=k)
+    baseline_report = calculate_label_report(base_scores, full_y, k=k)
     best_alpha = 0.0
     best_bias = np.zeros(NUM_LABELS, dtype=np.float32)
     best_metrics = baseline_metrics
@@ -357,12 +396,15 @@ def calibrate_xgboost_label_bias(
             best_metrics = metrics
 
     calibrated_share = calculate_topk_distribution(base_scores + best_bias, k=k)
+    calibrated_report = calculate_label_report(base_scores + best_bias, full_y, k=k)
     return {
         "bias": best_bias.tolist(),
         "alpha": best_alpha,
         "k": k,
         "baseline_metrics": baseline_metrics,
         "calibrated_metrics": best_metrics,
+        "baseline_report": baseline_report,
+        "calibrated_report": calibrated_report,
         "true_share": true_share.astype(float).tolist(),
         "pred_share_before": pred_share.astype(float).tolist(),
         "pred_share_after": calibrated_share.astype(float).tolist(),

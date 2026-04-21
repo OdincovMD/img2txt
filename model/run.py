@@ -135,6 +135,23 @@ def main(argv: list[str] | None = None) -> None:
             f"precision {before['precision']:.4f} -> {after['precision']:.4f}, "
             f"recall {before['recall']:.4f} -> {after['recall']:.4f}"
         )
+        report = calibration["calibrated_report"]
+        under_selected = sorted(report, key=lambda row: row["share_delta"])[:8]
+        over_selected = sorted(report, key=lambda row: row["share_delta"], reverse=True)[:8]
+        print("\nMost under-selected labels after calibration:")
+        for row in under_selected:
+            print(
+                f"  {row['label']}: "
+                f"true={row['true_share']:.3f}, selected={row['selected_share']:.3f}, "
+                f"delta={row['share_delta']:.3f}, recall@{calibration['k']}={row['recall_at_k']:.3f}"
+            )
+        print("\nMost over-selected labels after calibration:")
+        for row in over_selected:
+            print(
+                f"  {row['label']}: "
+                f"true={row['true_share']:.3f}, selected={row['selected_share']:.3f}, "
+                f"delta={row['share_delta']:.3f}, precision={row['precision_when_selected']:.3f}"
+            )
 
     save_checkpoint(
         checkpoint_path,
