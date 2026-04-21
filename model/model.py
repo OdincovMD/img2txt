@@ -364,6 +364,7 @@ def calibrate_xgboost_label_bias(
     k: int = 10,
     alpha_max: float = 2.0,
     steps: int = 81,
+    targeted_labels: list[str] | None = None,
 ) -> dict[str, Any]:
     full_preds = predict_xgboost_scores(
         models,
@@ -380,6 +381,10 @@ def calibrate_xgboost_label_bias(
     pred_share = calculate_topk_distribution(base_scores, k=k)
     base_bias = np.log((true_share + 1e-6) / (pred_share + 1e-6))
     base_bias = np.clip(base_bias, -3.0, 3.0).astype(np.float32)
+    if targeted_labels is not None:
+        targeted_set = set(targeted_labels)
+        target_mask = np.asarray([label in targeted_set for label in LABEL_NAMES], dtype=bool)
+        base_bias = np.where(target_mask, np.maximum(base_bias, 0.0), 0.0).astype(np.float32)
 
     baseline_metrics = evaluate_score_matrix(base_scores, full_y, k=k)
     baseline_report = calculate_label_report(base_scores, full_y, k=k)
@@ -387,13 +392,33 @@ def calibrate_xgboost_label_bias(
     best_bias = np.zeros(NUM_LABELS, dtype=np.float32)
     best_metrics = baseline_metrics
 
-    for alpha in np.linspace(0.0, alpha_max, steps):
-        candidate_bias = (alpha * base_bias).astype(np.float32)
-        metrics = evaluate_score_matrix(base_scores + candidate_bias, full_y, k=k)
-        if metrics["score"] > best_metrics["score"]:
-            best_alpha = float(alpha)
-            best_bias = candidate_bias
-            best_metrics = metrics
+    if targeted_labels is None:
+        for alpha in np.linspace(0.0, alpha_max, steps):
+            candidate_bias = (alpha * base_bias).astype(np.float32)
+            metrics = evaluate_score_matrix(base_scores + candidate_bias, full_y, k=k)
+            if metrics["score"] > best_metrics["score"]:
+                best_alpha = float(alpha)
+                best_bias = candidate_bias
+                best_metrics = metrics
+    else:
+        candidate_values = np.linspace(0.0, alpha_max, steps, dtype=np.float32)
+        target_indices = [idx for idx, label in enumerate(LABEL_NAMES) if label in set(targeted_labels)]
+        improved = True
+        while improved:
+            improved = False
+            for target_idx in target_indices:
+                current_value = best_bias[target_idx]
+                for value in candidate_values:
+                    if value < current_value:
+                        continue
+                    candidate_bias = best_bias.copy()
+                    candidate_bias[target_idx] = value
+                    metrics = evaluate_score_matrix(base_scores + candidate_bias, full_y, k=k)
+                    if metrics["score"] > best_metrics["score"]:
+                        best_alpha = float(max(best_alpha, value))
+                        best_bias = candidate_bias
+                        best_metrics = metrics
+                        improved = True
 
     calibrated_share = calculate_topk_distribution(base_scores + best_bias, k=k)
     calibrated_report = calculate_label_report(base_scores + best_bias, full_y, k=k)
@@ -401,6 +426,7 @@ def calibrate_xgboost_label_bias(
         "bias": best_bias.tolist(),
         "alpha": best_alpha,
         "k": k,
+        "targeted_labels": list(targeted_labels) if targeted_labels is not None else None,
         "baseline_metrics": baseline_metrics,
         "calibrated_metrics": best_metrics,
         "baseline_report": baseline_report,

@@ -10,7 +10,6 @@ LABEL_NAMES: List[str] = [
     "borders",
     "contrast",
     "palette",
-    "texture",
     "elongation",
     "rim",
     "color_homogeneity",
@@ -29,7 +28,6 @@ LABEL_NAMES: List[str] = [
     "delta_V_top_bottom",
     "delta_S_left_right",
     "std_H_lesion",
-    "glcm_energy",
 ]
 NUM_LABELS = len(LABEL_NAMES)
 TOP_K = 10

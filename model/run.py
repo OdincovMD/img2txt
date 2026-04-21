@@ -21,6 +21,25 @@ from model.model import (
 )
 
 
+DEFAULT_TARGETED_CALIBRATION_LABELS = ",".join(
+    [
+        "palette",
+        "borders",
+        "delta_V_top_bottom",
+        "delta_V_left_right",
+        "delta_V_center_periphery",
+        "structure_order",
+        "delta_H_center_periphery",
+        "elongation",
+    ]
+)
+
+
+def parse_label_list(raw: str) -> list[str] | None:
+    labels = [label.strip() for label in raw.split(",") if label.strip()]
+    return labels or None
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Train the XGBoost importance model")
     parser.add_argument("--features-csv", default=DEFAULT_FEATURES_CSV)
@@ -42,6 +61,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--calibration-k", type=int, default=10)
     parser.add_argument("--calibration-alpha-max", type=float, default=2.0)
     parser.add_argument("--calibration-steps", type=int, default=81)
+    parser.add_argument(
+        "--targeted-calibration-labels",
+        default=DEFAULT_TARGETED_CALIBRATION_LABELS,
+        help="Comma-separated labels to boost during calibration. Pass an empty string for global calibration.",
+    )
     return parser
 
 
@@ -115,6 +139,7 @@ def main(argv: list[str] | None = None) -> None:
 
     calibration = None
     if args.calibrate_label_bias:
+        targeted_labels = parse_label_list(args.targeted_calibration_labels)
         calibration = calibrate_xgboost_label_bias(
             models,
             X_val,
@@ -125,6 +150,7 @@ def main(argv: list[str] | None = None) -> None:
             k=args.calibration_k,
             alpha_max=args.calibration_alpha_max,
             steps=args.calibration_steps,
+            targeted_labels=targeted_labels,
         )
         before = calibration["baseline_metrics"]
         after = calibration["calibrated_metrics"]
@@ -135,6 +161,8 @@ def main(argv: list[str] | None = None) -> None:
             f"precision {before['precision']:.4f} -> {after['precision']:.4f}, "
             f"recall {before['recall']:.4f} -> {after['recall']:.4f}"
         )
+        if targeted_labels is not None:
+            print(f"Targeted calibration labels: {', '.join(targeted_labels)}")
         report = calibration["calibrated_report"]
         under_selected = sorted(report, key=lambda row: row["share_delta"])[:8]
         over_selected = sorted(report, key=lambda row: row["share_delta"], reverse=True)[:8]
