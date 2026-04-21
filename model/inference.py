@@ -8,8 +8,14 @@ import pandas as pd
 from tqdm import tqdm
 
 from bucketing.schema import bucket_column_name
-from model.config import LABEL_NAMES, NUM_LABELS
-from model.model import build_features_for_inference, get_xgb_model_type, load_checkpoint, predict_xgboost_scores
+from model.config import LABEL_NAMES
+from model.model import (
+    apply_calibration_bias,
+    build_features_for_inference,
+    get_xgb_model_type,
+    load_checkpoint,
+    predict_xgboost_scores,
+)
 
 try:
     import xgboost as xgb
@@ -22,6 +28,8 @@ def _row_labels_from_buckets(row: pd.Series) -> dict[str, str]:
     for key in LABEL_NAMES:
         value = row.get(bucket_column_name(key))
         if isinstance(value, str):
+            if ":" in value:
+                value = value.split(":", 1)[1]
             labels[key] = value
     return labels
 
@@ -50,6 +58,7 @@ def _predict_row(row: pd.Series, checkpoint: dict, k: int = 10) -> List[str]:
         model_type=get_xgb_model_type(checkpoint),
         chain_order=checkpoint.get("chain_order"),
     )[0]
+    full_preds = apply_calibration_bias(full_preds.reshape(1, -1), checkpoint.get("calibration_bias"))[0]
 
     top_idx = np.argsort(full_preds)[::-1][:k].tolist()
     return _top_indices_to_labels(top_idx, labels_dict, k=k)
@@ -70,8 +79,22 @@ def rank_features_batch(
 
     try:
         checkpoint = load_checkpoint(importance_model_path)
+        X = build_features_for_inference(result_df, checkpoint)
+        full_preds = predict_xgboost_scores(
+            checkpoint["models"],
+            X,
+            checkpoint["valid_target_indices"],
+            model_type=get_xgb_model_type(checkpoint),
+            chain_order=checkpoint.get("chain_order"),
+        )
+        full_preds = apply_calibration_bias(full_preds, checkpoint.get("calibration_bias"))
         iterator = tqdm(result_df.iterrows(), total=len(result_df)) if verbose else result_df.iterrows()
-        result_df["important_labels"] = [_predict_row(row, checkpoint, k=k) for _, row in iterator]
+        labels = []
+        for row_idx, (_, row) in enumerate(iterator):
+            labels_dict = _row_labels_from_buckets(row)
+            top_idx = np.argsort(full_preds[row_idx])[::-1][:k].tolist()
+            labels.append(_top_indices_to_labels(top_idx, labels_dict, k=k))
+        result_df["important_labels"] = labels
     except Exception as exc:
         print(f"Warning: Could not rank features: {exc}")
         result_df["important_labels"] = [[] for _ in range(len(result_df))]

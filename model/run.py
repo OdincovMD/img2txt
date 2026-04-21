@@ -12,6 +12,7 @@ from model.config import (
     get_default_xgb_checkpoint_path,
 )
 from model.model import (
+    calibrate_xgboost_label_bias,
     load_checkpoint,
     optimize_xgboost,
     prepare_training_data,
@@ -37,6 +38,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--n-trials", type=int, default=OPTUNA_TRIALS)
     parser.add_argument("--checkpoint-path")
     parser.add_argument("--skip-optuna", action="store_true")
+    parser.add_argument("--calibrate-label-bias", action="store_true")
+    parser.add_argument("--calibration-k", type=int, default=10)
+    parser.add_argument("--calibration-alpha-max", type=float, default=2.0)
+    parser.add_argument("--calibration-steps", type=int, default=81)
     return parser
 
 
@@ -108,6 +113,29 @@ def main(argv: list[str] | None = None) -> None:
     )
     print(f"Final score: {score:.4f}")
 
+    calibration = None
+    if args.calibrate_label_bias:
+        calibration = calibrate_xgboost_label_bias(
+            models,
+            X_val,
+            y_val,
+            valid_target_indices,
+            model_type=args.model_type,
+            chain_order=metadata.get("chain_order"),
+            k=args.calibration_k,
+            alpha_max=args.calibration_alpha_max,
+            steps=args.calibration_steps,
+        )
+        before = calibration["baseline_metrics"]
+        after = calibration["calibrated_metrics"]
+        print(
+            "Calibration: "
+            f"alpha={calibration['alpha']:.3f}, "
+            f"score {before['score']:.4f} -> {after['score']:.4f}, "
+            f"precision {before['precision']:.4f} -> {after['precision']:.4f}, "
+            f"recall {before['recall']:.4f} -> {after['recall']:.4f}"
+        )
+
     save_checkpoint(
         checkpoint_path,
         models,
@@ -117,6 +145,8 @@ def main(argv: list[str] | None = None) -> None:
         feature_set=args.feature_set,
         model_type=args.model_type,
         chain_order=metadata.get("chain_order"),
+        calibration_bias=calibration["bias"] if calibration else None,
+        calibration_metadata=calibration,
     )
     print(f"Checkpoint saved to: {checkpoint_path}")
 

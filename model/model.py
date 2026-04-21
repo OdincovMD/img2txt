@@ -60,6 +60,53 @@ def calculate_precision_recall_at_k(preds: np.ndarray, true_indices: list[int], 
     return intersection / k, intersection / len(true_indices)
 
 
+def scores_to_logits(scores: np.ndarray, eps: float = 1e-6) -> np.ndarray:
+    clipped = np.clip(scores, eps, 1.0 - eps)
+    return np.log(clipped / (1.0 - clipped))
+
+
+def apply_calibration_bias(scores: np.ndarray, calibration_bias: list[float] | np.ndarray | None) -> np.ndarray:
+    if calibration_bias is None:
+        return scores
+    bias = np.asarray(calibration_bias, dtype=np.float32)
+    if bias.shape[0] != scores.shape[1]:
+        raise ValueError(f"Calibration bias has {bias.shape[0]} labels, expected {scores.shape[1]}.")
+    return scores_to_logits(scores) + bias
+
+
+def build_full_target_matrix(y: np.ndarray, valid_target_indices: list[int]) -> np.ndarray:
+    full_y = np.zeros((len(y), NUM_LABELS), dtype=np.float32)
+    for model_idx, target_idx in enumerate(valid_target_indices):
+        full_y[:, target_idx] = y[:, model_idx]
+    return full_y
+
+
+def evaluate_score_matrix(scores: np.ndarray, full_y: np.ndarray, k: int = 10) -> dict[str, float]:
+    precision_values, recall_values = [], []
+    for row_idx in range(len(scores)):
+        true_indices = np.where(full_y[row_idx] > 0)[0].tolist()
+        if not true_indices:
+            continue
+        p_at_k, r_at_k = calculate_precision_recall_at_k(scores[row_idx], true_indices, k=k)
+        precision_values.append(p_at_k)
+        recall_values.append(r_at_k)
+
+    if not precision_values:
+        return {"score": 0.0, "precision": 0.0, "recall": 0.0}
+
+    precision = float(np.mean(precision_values))
+    recall = float(np.mean(recall_values))
+    return {"score": (precision + recall) / 2, "precision": precision, "recall": recall}
+
+
+def calculate_topk_distribution(scores: np.ndarray, k: int = 10) -> np.ndarray:
+    counts = np.zeros(scores.shape[1], dtype=np.float32)
+    for row_idx in range(len(scores)):
+        top_indices = np.argsort(scores[row_idx])[-k:]
+        counts[top_indices] += 1
+    return counts / max(len(scores) * k, 1)
+
+
 def get_numeric_feature_columns(df: pd.DataFrame) -> list[str]:
     ordered = [*FEATURE_COLUMNS, *COMPOSITE_FEATURE_COLUMNS]
     return [col for col in ordered if col in df.columns and pd.api.types.is_numeric_dtype(df[col])]
@@ -264,22 +311,62 @@ def evaluate_models(
         model_type=model_type,
         chain_order=chain_order,
     )
-    full_y = np.zeros((len(X_val), NUM_LABELS), dtype=np.float32)
-    for model_idx, target_idx in enumerate(valid_target_indices):
-        full_y[:, target_idx] = y_val[:, model_idx]
+    full_y = build_full_target_matrix(y_val, valid_target_indices)
 
-    p10_values, r10_values = [], []
-    for row_idx in range(len(full_preds)):
-        true_indices = np.where(full_y[row_idx] > 0)[0].tolist()
-        if not true_indices:
-            continue
-        p_at_k, r_at_k = calculate_precision_recall_at_k(full_preds[row_idx], true_indices, k=10)
-        p10_values.append(p_at_k)
-        r10_values.append(r_at_k)
+    return evaluate_score_matrix(full_preds, full_y, k=10)["score"]
 
-    if not p10_values:
-        return 0.0
-    return (sum(p10_values) / len(p10_values) + sum(r10_values) / len(r10_values)) / 2
+
+def calibrate_xgboost_label_bias(
+    models: list[xgb.Booster],
+    X_val: pd.DataFrame,
+    y_val: np.ndarray,
+    valid_target_indices: list[int],
+    model_type: XgbModelType = DEFAULT_XGB_MODEL_TYPE,
+    chain_order: list[int] | None = None,
+    k: int = 10,
+    alpha_max: float = 2.0,
+    steps: int = 81,
+) -> dict[str, Any]:
+    full_preds = predict_xgboost_scores(
+        models,
+        X_val,
+        valid_target_indices,
+        model_type=model_type,
+        chain_order=chain_order,
+    )
+    full_y = build_full_target_matrix(y_val, valid_target_indices)
+    base_scores = scores_to_logits(full_preds)
+
+    true_share = full_y.sum(axis=0)
+    true_share = true_share / max(float(true_share.sum()), 1.0)
+    pred_share = calculate_topk_distribution(base_scores, k=k)
+    base_bias = np.log((true_share + 1e-6) / (pred_share + 1e-6))
+    base_bias = np.clip(base_bias, -3.0, 3.0).astype(np.float32)
+
+    baseline_metrics = evaluate_score_matrix(base_scores, full_y, k=k)
+    best_alpha = 0.0
+    best_bias = np.zeros(NUM_LABELS, dtype=np.float32)
+    best_metrics = baseline_metrics
+
+    for alpha in np.linspace(0.0, alpha_max, steps):
+        candidate_bias = (alpha * base_bias).astype(np.float32)
+        metrics = evaluate_score_matrix(base_scores + candidate_bias, full_y, k=k)
+        if metrics["score"] > best_metrics["score"]:
+            best_alpha = float(alpha)
+            best_bias = candidate_bias
+            best_metrics = metrics
+
+    calibrated_share = calculate_topk_distribution(base_scores + best_bias, k=k)
+    return {
+        "bias": best_bias.tolist(),
+        "alpha": best_alpha,
+        "k": k,
+        "baseline_metrics": baseline_metrics,
+        "calibrated_metrics": best_metrics,
+        "true_share": true_share.astype(float).tolist(),
+        "pred_share_before": pred_share.astype(float).tolist(),
+        "pred_share_after": calibrated_share.astype(float).tolist(),
+    }
 
 
 def train_xgboost_models(
@@ -427,6 +514,8 @@ def save_checkpoint(
     feature_set: FeatureSet = DEFAULT_FEATURE_SET,
     model_type: XgbModelType = DEFAULT_XGB_MODEL_TYPE,
     chain_order: list[int] | None = None,
+    calibration_bias: list[float] | None = None,
+    calibration_metadata: dict[str, Any] | None = None,
 ) -> None:
     serialized_models = [model.save_raw() for model in models]
     checkpoint = {
@@ -439,6 +528,8 @@ def save_checkpoint(
         "chain_order": list(chain_order or valid_target_indices),
         "label_names": list(LABEL_NAMES),
         "num_labels": NUM_LABELS,
+        "calibration_bias": calibration_bias,
+        "calibration_metadata": calibration_metadata,
     }
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -458,6 +549,10 @@ def load_checkpoint(path: str | Path) -> dict[str, Any]:
 
     checkpoint["models"] = models
     checkpoint.setdefault("model_type", DEFAULT_XGB_MODEL_TYPE)
+    if not checkpoint.get("feature_set"):
+        checkpoint["feature_set"] = DEFAULT_FEATURE_SET
     checkpoint.setdefault("chain_order", list(checkpoint["valid_target_indices"]))
+    checkpoint.setdefault("calibration_bias", None)
+    checkpoint.setdefault("calibration_metadata", None)
     del checkpoint["models_raw"]
     return checkpoint
