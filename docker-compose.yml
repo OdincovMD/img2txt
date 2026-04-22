@@ -1,0 +1,25 @@
+name: img2txt-description
+
+services:
+  description_service:
+    build:
+      context: .
+      dockerfile: service/Dockerfile
+    env_file:
+      - path: service/.env
+        required: false
+    expose:
+      - "8000"
+    volumes:
+      - ./weights:/app/weights:ro
+      - ./model/checkpoints:/app/model/checkpoints:ro
+      - description_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://127.0.0.1:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  description_data:

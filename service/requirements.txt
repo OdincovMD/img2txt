@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+python-multipart
+httpx
+openai
+python-dotenv
+opencv-python
+numpy
+pandas
+scikit-learn
+scipy
+scikit-image
+xgboost
+pydantic
+sqlalchemy
