@@ -29,7 +29,64 @@ from model.mlp import (
 from model.model import FeatureSet, build_target_vector, parse_expert_labels
 
 
-def suggest_mlp_params(trial: optuna.Trial, input_dim: int) -> dict[str, Any]:
+REQUIRED_MLP_PARAMS = [
+    "batch_size",
+    "learning_rate",
+    "weight_decay",
+    "dropout",
+    "max_epochs",
+    "patience",
+    "hidden_dims",
+]
+
+
+def suggest_mlp_param_from_spec(trial: optuna.Trial, name: str, spec: dict[str, Any]) -> Any:
+    kind = spec.get("type")
+    if kind == "float":
+        return trial.suggest_float(
+            name,
+            spec["low"],
+            spec["high"],
+            log=bool(spec.get("log", False)),
+            step=spec.get("step"),
+        )
+    if kind == "int":
+        return trial.suggest_int(
+            name,
+            spec["low"],
+            spec["high"],
+            log=bool(spec.get("log", False)),
+            step=int(spec.get("step", 1)),
+        )
+    if kind == "categorical":
+        return trial.suggest_categorical(name, spec["choices"])
+    raise ValueError(f"Unsupported Optuna spec for {name!r}: {spec!r}")
+
+
+def normalize_mlp_params(params: dict[str, Any]) -> dict[str, Any]:
+    normalized = params.copy()
+    if "hidden_dims" not in normalized and {"hidden1", "hidden2"}.issubset(normalized):
+        normalized["hidden_dims"] = (normalized["hidden1"], normalized["hidden2"])
+    if "hidden_dims" in normalized:
+        hidden_dims = tuple(normalized["hidden_dims"])
+        if len(hidden_dims) != 2:
+            raise ValueError(f"hidden_dims must contain exactly 2 values, got {hidden_dims!r}.")
+        normalized["hidden_dims"] = (int(hidden_dims[0]), int(hidden_dims[1]))
+    missing = [name for name in REQUIRED_MLP_PARAMS if name not in normalized]
+    if missing:
+        raise ValueError(f"Missing required MLP params: {', '.join(missing)}")
+    return normalized
+
+
+def suggest_mlp_params(
+    trial: optuna.Trial,
+    input_dim: int,
+    optuna_kwargs: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    if optuna_kwargs is not None:
+        params = {name: suggest_mlp_param_from_spec(trial, name, spec) for name, spec in optuna_kwargs.items()}
+        return normalize_mlp_params(params)
+
     wide_upper = 256 if input_dim <= 64 else 384
     hidden1 = trial.suggest_categorical("hidden1", [64, 128, 192, 256, wide_upper])
     hidden2_upper = max(32, min(hidden1, 192))
@@ -73,12 +130,13 @@ def optimize_mlp(
     n_trials: int = 20,
     n_splits: int = 5,
     verbose: bool = True,
+    kwargs: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[optuna.Study, pd.DataFrame]:
     X_full, targets, numeric_columns = _prepare_dataset(features_csv, annotations_csv, feature_set)
     splitter = KFold(n_splits=n_splits, shuffle=True, random_state=SEED)
 
     def objective(trial: optuna.Trial) -> float:
-        params = suggest_mlp_params(trial, input_dim=X_full.shape[1])
+        params = suggest_mlp_params(trial, input_dim=X_full.shape[1], optuna_kwargs=kwargs)
         fold_scores: list[float] = []
         for fold_idx, (train_idx, val_idx) in enumerate(splitter.split(X_full), start=1):
             X_train = X_full.iloc[train_idx].copy()
@@ -133,8 +191,7 @@ def train_final_mlp_from_study(
     scaler = fit_feature_scaler(X_full, numeric_columns)
     feature_columns = X_full.columns.tolist()
     X_full_np = transform_features(X_full, scaler, numeric_columns)
-    params = study.best_params.copy()
-    hidden_dims = (params.pop("hidden1"), params.pop("hidden2"))
+    params = normalize_mlp_params(study.best_params)
     model, metadata = train_mlp_model(
         X_full_np,
         X_full_np,
@@ -150,11 +207,58 @@ def train_final_mlp_from_study(
         learning_rate=params["learning_rate"],
         weight_decay=params["weight_decay"],
         dropout=params["dropout"],
-        hidden_dims_override=hidden_dims,
+        hidden_dims_override=params["hidden_dims"],
     )
     metadata["optuna_best_params"] = study.best_params
     save_mlp_checkpoint(checkpoint_path, model, metadata)
     return metadata
+
+
+def mlp(
+    features_csv: str = DEFAULT_FEATURES_CSV,
+    annotations_csv: str = DEFAULT_ANNOTATIONS_CSV,
+    feature_set: FeatureSet = DEFAULT_MLP_FEATURE_SET,
+    n_trials: int = 20,
+    n_splits: int = 5,
+    checkpoint_path: str | Path = DEFAULT_MLP_CHECKPOINT_PATH,
+    skip_final_train: bool = False,
+    kwargs: dict[str, dict[str, Any]] | None = None,
+    verbose: bool = True,
+) -> dict[str, Any]:
+    study, trials_df = optimize_mlp(
+        features_csv=features_csv,
+        annotations_csv=annotations_csv,
+        feature_set=feature_set,
+        n_trials=n_trials,
+        n_splits=n_splits,
+        verbose=verbose,
+        kwargs=kwargs,
+    )
+    if verbose:
+        print("\nTop trials:")
+        print(trials_df.head(10).to_string(index=False))
+
+    metadata = None
+    if not skip_final_train:
+        metadata = train_final_mlp_from_study(
+            study,
+            features_csv=features_csv,
+            annotations_csv=annotations_csv,
+            checkpoint_path=checkpoint_path,
+            feature_set=feature_set,
+        )
+        if verbose:
+            print(f"\nFinal checkpoint saved to: {checkpoint_path}")
+            print(f"Final score on full data reference: {metadata['best_score']:.4f}")
+
+    return {
+        "study": study,
+        "trials_df": trials_df,
+        "metadata": metadata,
+        "checkpoint_path": str(checkpoint_path),
+        "best_params": study.best_params,
+        "best_score": study.best_value,
+    }
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -173,29 +277,16 @@ def main(argv: list[str] | None = None) -> None:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
 
-    study, trials_df = optimize_mlp(
+    mlp(
         features_csv=args.features_csv,
         annotations_csv=args.annotations_csv,
         feature_set=args.feature_set,
         n_trials=args.n_trials,
         n_splits=args.n_splits,
+        checkpoint_path=args.checkpoint_path,
+        skip_final_train=args.skip_final_train,
         verbose=True,
     )
-    print("\nTop trials:")
-    print(trials_df.head(10).to_string(index=False))
-
-    if args.skip_final_train:
-        return
-
-    metadata = train_final_mlp_from_study(
-        study,
-        features_csv=args.features_csv,
-        annotations_csv=args.annotations_csv,
-        checkpoint_path=args.checkpoint_path,
-        feature_set=args.feature_set,
-    )
-    print(f"\nFinal checkpoint saved to: {args.checkpoint_path}")
-    print(f"Final score on full data reference: {metadata['best_score']:.4f}")
 
 
 if __name__ == "__main__":

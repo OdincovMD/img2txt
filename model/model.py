@@ -152,6 +152,18 @@ def get_numeric_feature_columns(df: pd.DataFrame) -> list[str]:
 
 FeatureSet = Literal["numeric_only", "selected_buckets", "all_buckets"]
 XgbModelType = Literal["xgb", "xgb_classifier_chain"]
+REQUIRED_XGB_PARAMS = [
+    "max_depth",
+    "learning_rate",
+    "reg_lambda",
+    "reg_alpha",
+    "subsample",
+    "colsample_bytree",
+    "min_child_weight",
+    "gamma",
+    "max_bin",
+    "n_estimators",
+]
 
 
 def get_bucket_feature_columns(df: pd.DataFrame, feature_set: FeatureSet = DEFAULT_FEATURE_SET) -> list[str]:
@@ -245,6 +257,9 @@ def append_chain_features(
 
 
 def build_xgb_training_params(params: dict[str, Any]) -> dict[str, Any]:
+    missing = [name for name in REQUIRED_XGB_PARAMS if name not in params]
+    if missing:
+        raise ValueError(f"Missing required XGBoost params: {', '.join(missing)}")
     return {
         "objective": "binary:logistic",
         "eval_metric": "logloss",
@@ -517,7 +532,37 @@ def train_xgb_classifier_chain(
     return models, score, {"chain_order": chain_order}
 
 
-def suggest_xgb_params(trial: optuna.Trial, feature_set: FeatureSet = DEFAULT_FEATURE_SET) -> dict[str, Any]:
+def suggest_xgb_param_from_spec(trial: optuna.Trial, name: str, spec: dict[str, Any]) -> Any:
+    kind = spec.get("type")
+    if kind == "float":
+        return trial.suggest_float(
+            name,
+            spec["low"],
+            spec["high"],
+            log=bool(spec.get("log", False)),
+            step=spec.get("step"),
+        )
+    if kind == "int":
+        return trial.suggest_int(
+            name,
+            spec["low"],
+            spec["high"],
+            log=bool(spec.get("log", False)),
+            step=int(spec.get("step", 1)),
+        )
+    if kind == "categorical":
+        return trial.suggest_categorical(name, spec["choices"])
+    raise ValueError(f"Unsupported Optuna spec for {name!r}: {spec!r}")
+
+
+def suggest_xgb_params(
+    trial: optuna.Trial,
+    feature_set: FeatureSet = DEFAULT_FEATURE_SET,
+    optuna_kwargs: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    if optuna_kwargs is not None:
+        return {name: suggest_xgb_param_from_spec(trial, name, spec) for name, spec in optuna_kwargs.items()}
+
     shared_params = {
         "learning_rate": trial.suggest_float("learning_rate", 3e-3, 0.08, log=True),
         "n_estimators": trial.suggest_int("n_estimators", 500, 1600),
@@ -554,9 +599,10 @@ def optimize_xgboost(
     n_trials: int,
     feature_set: FeatureSet = DEFAULT_FEATURE_SET,
     model_type: XgbModelType = DEFAULT_XGB_MODEL_TYPE,
+    optuna_kwargs: dict[str, dict[str, Any]] | None = None,
 ) -> optuna.study.Study:
     def objective(trial: optuna.Trial) -> float:
-        params = suggest_xgb_params(trial, feature_set=feature_set)
+        params = suggest_xgb_params(trial, feature_set=feature_set, optuna_kwargs=optuna_kwargs)
         _, score, _ = train_xgboost_models_by_type(
             X_train,
             X_val,
