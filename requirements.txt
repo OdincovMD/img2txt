@@ -17,3 +17,5 @@ flask
 xgboost
 optuna
 category-encoders
+openai
+python-dotenv

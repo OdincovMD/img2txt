@@ -82,4 +82,4 @@ class ClassificationResult:
         yield f"- Структура: {self.structure.value}"
         yield f"- Свойства: {self.property_text()}"
         if self.final_class:
-            yield f"- Итоговый класс: {self.final_class}"
+            yield f"- Финальная классификация: {self.final_class}"

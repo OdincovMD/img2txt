@@ -24,6 +24,8 @@ training/checkpoints/
 .gitnexus
 weights/
 tests/
+!generation/tests/
+!generation/tests/*.py
 images/
 .codex
 .claude/
