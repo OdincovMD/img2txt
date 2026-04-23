@@ -12,12 +12,21 @@ services:
     volumes:
       - ./model/checkpoints:/app/model/checkpoints:ro
       - description_data:/data
+    networks:
+      skin-ai-network:
+        aliases:
+          - description_service
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://127.0.0.1:8000/health || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 30s
+
+networks:
+  skin-ai-network:
+    external: true
+    name: skin-ai-network
 
 volumes:
   description_data:
