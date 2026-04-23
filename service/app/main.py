@@ -1,8 +1,6 @@
 """FastAPI entrypoint for the private image description service."""
 
 from __future__ import annotations
-
-import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -28,9 +26,3 @@ app = FastAPI(
     openapi_url=None,
 )
 app.include_router(description.router)
-
-if __name__ == "__main__":
-    import uvicorn
-
-    port = int(os.environ.get("PORT", "8000"))
-    uvicorn.run("service.app.main:app", host="0.0.0.0", port=port)

@@ -6,12 +6,10 @@ services:
       context: .
       dockerfile: service/Dockerfile
     env_file:
-      - path: service/.env
-        required: false
+      - service/.env
     expose:
       - "8000"
     volumes:
-      - ./weights:/app/weights:ro
       - ./model/checkpoints:/app/model/checkpoints:ro
       - description_data:/data
     healthcheck:
