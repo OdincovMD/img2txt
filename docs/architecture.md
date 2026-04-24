@@ -18,6 +18,8 @@
 На выходе сервис формирует:
 
 - список наиболее значимых признаков
+- полный список рассчитанных лейблов
+- полный список bucket-лейблов
 - итоговое клиническое описание
 - payload callback-запроса для внешнего backend
 
@@ -32,6 +34,10 @@ received
   -> features_ready
   -> generating
   -> completed
+
+received
+  -> features_ready
+  -> callback attempt
 
 received
   -> classification_ready
@@ -51,6 +57,11 @@ received
 
 - `important_labels`
 - `classification`
+
+Исключение: если задача создана с `features_only=true`, генерация описания
+вообще не запускается. В этом режиме сервис завершает работу после расчёта
+признаков, остаётся в состоянии `features_ready` и пытается отправить callback
+сразу из этого состояния.
 
 ## Основные слои
 
@@ -107,6 +118,9 @@ received
 - `job_id`
 - `status`
 - `important_labels`
+- `all_labels`
+- `bucketed_labels`
+- `features_only`
 - `classification`
 - `description`
 - `error`
@@ -124,6 +138,7 @@ received
 - извлечение признаков
 - бакетизацию
 - ранжирование
+- подготовку полного набора label- и bucket-представлений
 - нормализацию payload классификации
 - генерацию текста
 
@@ -149,21 +164,27 @@ received
 2. задача создаётся или обновляется со статусом `received`
 3. `description_jobs.extract_features_task()` сохраняет временные файлы
 4. pipeline извлекает признаки
-5. ranking формирует `important_labels`
-6. storage сохраняет результат как `features_ready` или `generating`
-7. если классификация уже существует, запускается генерация и callback
+5. pipeline формирует `all_labels` и `bucketed_labels`
+6. ranking формирует `important_labels`
+7. storage сохраняет результат как `features_ready` или `generating`
+8. если задача создана с `features_only=true`, выполняется callback без
+   генерации текста
+9. если классификация уже существует и `features_only=false`, запускается
+   генерация и callback
 
 ### Ветка 2: классификация
 
 1. HTTP-слой принимает `POST /v1/description-jobs/{job_id}/classification`
 2. storage сохраняет payload классификации
-3. статус становится `classification_ready` или `generating`
-4. если признаки уже существуют, запускается генерация и callback
+3. статус становится `classification_ready`, `features_ready` или `generating`
+4. если признаки уже существуют и `features_only=false`, запускается генерация
+   и callback
 
 ### Ветка 3: генерация
 
 1. `maybe_generate_and_callback()` читает состояние задачи
-2. проверяет наличие `important_labels` и `classification`
+2. проверяет наличие `important_labels` и `classification`, а также что
+   задача не запущена в `features_only`
 3. вызывает генерацию текста
 4. сохраняет итоговое описание как `completed`
 5. вызывает callback backend

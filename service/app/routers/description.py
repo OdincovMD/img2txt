@@ -25,6 +25,7 @@ def health() -> dict[str, str]:
 async def create_description_job(
     background_tasks: BackgroundTasks,
     job_id: str = Form(...),
+    features_only: bool = Form(False),
     image: UploadFile = File(...),
     mask: UploadFile = File(...),
 ) -> dict[str, str]:
@@ -37,7 +38,7 @@ async def create_description_job(
         raise HTTPException(status_code=422, detail="image and mask are required")
 
     clean_job_id = job_id.strip()
-    storage.upsert_received(clean_job_id)
+    storage.upsert_received(clean_job_id, features_only=features_only)
     background_tasks.add_task(
         extract_features_task,
         clean_job_id,
@@ -45,6 +46,7 @@ async def create_description_job(
         mask_bytes,
         image.filename,
         mask.filename,
+        features_only,
     )
     return {"job_id": clean_job_id, "status": "received"}
 
@@ -64,7 +66,7 @@ async def complete_description_job(
         raise HTTPException(status_code=422, detail="job_id is required")
 
     job = storage.save_classification(clean_job_id, payload)
-    if job.get("important_labels"):
+    if job.get("important_labels") and not job.get("features_only"):
         background_tasks.add_task(maybe_generate_and_callback, clean_job_id)
     return {"job_id": clean_job_id, "status": str(job["status"])}
 

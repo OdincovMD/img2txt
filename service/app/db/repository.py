@@ -17,6 +17,9 @@ def _serialize(job: DescriptionJob) -> dict[str, Any]:
         "job_id": job.job_id,
         "status": job.status,
         "important_labels": job.important_labels,
+        "all_labels": job.all_labels,
+        "bucketed_labels": job.bucketed_labels,
+        "features_only": job.features_only,
         "classification": job.classification,
         "description": job.description,
         "error": job.error,
@@ -31,19 +34,21 @@ def get_job(session: Session, job_id: str) -> dict[str, Any] | None:
     return _serialize(job) if job else None
 
 
-def upsert_received(session: Session, job_id: str) -> dict[str, Any]:
+def upsert_received(session: Session, job_id: str, features_only: bool = False) -> dict[str, Any]:
     job = session.get(DescriptionJob, job_id)
     now = utc_now()
     if job is None:
         job = DescriptionJob(
             job_id=job_id,
             status="received",
+            features_only=features_only,
             created_at=now,
             updated_at=now,
         )
         session.add(job)
     elif job.status not in TERMINAL_STATUSES:
         job.status = "received"
+        job.features_only = features_only
         job.error = None
         job.updated_at = now
     session.commit()
@@ -51,7 +56,14 @@ def upsert_received(session: Session, job_id: str) -> dict[str, Any]:
     return _serialize(job)
 
 
-def save_features(session: Session, job_id: str, important_labels: list[str]) -> dict[str, Any]:
+def save_features(
+    session: Session,
+    job_id: str,
+    important_labels: list[str],
+    all_labels: list[str] | None = None,
+    bucketed_labels: list[str] | None = None,
+    features_only: bool = False,
+) -> dict[str, Any]:
     job = session.get(DescriptionJob, job_id)
     now = utc_now()
     if job is None:
@@ -59,13 +71,19 @@ def save_features(session: Session, job_id: str, important_labels: list[str]) ->
             job_id=job_id,
             status="features_ready",
             important_labels=important_labels,
+            all_labels=all_labels,
+            bucketed_labels=bucketed_labels,
+            features_only=features_only,
             created_at=now,
             updated_at=now,
         )
         session.add(job)
     else:
         job.important_labels = important_labels
-        job.status = "generating" if job.classification else "features_ready"
+        job.all_labels = all_labels
+        job.bucketed_labels = bucketed_labels
+        job.features_only = features_only
+        job.status = "generating" if job.classification and not job.features_only else "features_ready"
         job.error = None
         job.updated_at = now
     session.commit()
@@ -87,7 +105,12 @@ def save_classification(session: Session, job_id: str, classification: dict[str,
         session.add(job)
     else:
         job.classification = classification
-        job.status = "generating" if job.important_labels else "classification_ready"
+        if job.important_labels and not job.features_only:
+            job.status = "generating"
+        elif job.important_labels:
+            job.status = "features_ready"
+        else:
+            job.status = "classification_ready"
         job.error = None
         job.updated_at = now
     session.commit()
@@ -145,4 +168,3 @@ def mark_callback_sent(session: Session, job_id: str) -> None:
     job.callback_sent = True
     job.updated_at = utc_now()
     session.commit()
-

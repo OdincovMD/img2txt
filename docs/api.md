@@ -34,6 +34,9 @@ X-Service-Token: <SERVICE_API_TOKEN>
 
 - текущий статус обработки
 - список важных признаков
+- список всех рассчитанных лейблов
+- список всех рассчитанных bucket-лейблов
+- флаг режима обработки только признаков
 - payload классификации
 - сгенерированное описание
 - текст ошибки
@@ -72,6 +75,8 @@ X-Service-Token: <SERVICE_API_TOKEN>
 Поля:
 
 - `job_id`: строковый идентификатор внешней задачи
+- `features_only`: опциональный boolean-флаг; если `true`, сервис не ждёт
+  классификацию и не генерирует финальный текст
 - `image`: исходное изображение
 - `mask`: маска очага
 
@@ -81,6 +86,7 @@ X-Service-Token: <SERVICE_API_TOKEN>
 curl -X POST http://127.0.0.1:8000/v1/description-jobs \
   -H "X-Service-Token: <SERVICE_API_TOKEN>" \
   -F "job_id=case-123" \
+  -F "features_only=false" \
   -F "image=@./test_images/100.jpg" \
   -F "mask=@./test_images/100_mask.jpg"
 ```
@@ -103,6 +109,10 @@ curl -X POST http://127.0.0.1:8000/v1/description-jobs \
 1. создаёт или обновляет состояние задачи
 2. ставит фоновую задачу на обработку изображения и маски
 3. возвращает ответ до завершения извлечения признаков
+
+Если `features_only=true`, после извлечения признаков сервис сохраняет
+`important_labels`, `all_labels`, `bucketed_labels`, оставляет описание пустым,
+не ждёт `/classification` и сразу отправляет callback с текущим состоянием.
 
 ### Ошибки
 
@@ -171,6 +181,8 @@ curl -X POST http://127.0.0.1:8000/v1/description-jobs/case-123/classification \
   задачу в `classification_ready`
 - если признаки уже готовы, сервис переводит задачу в `generating` и запускает
   этап генерации описания
+- если задача была создана с `features_only=true`, классификация может быть
+  сохранена в состоянии задачи, но генерация текста не запускается
 
 ### Ошибки
 
@@ -191,6 +203,9 @@ curl -X POST http://127.0.0.1:8000/v1/description-jobs/case-123/classification \
   "job_id": "case-123",
   "status": "completed",
   "important_labels": ["shape:неправильная"],
+  "all_labels": ["shape:неправильная", "borders:фестончатые"],
+  "bucketed_labels": ["bucket_shape:неправильная", "bucket_borders:фестончатые"],
+  "features_only": false,
   "classification": {
     "feature_type": "Один признак",
     "structure": "Комки",
@@ -213,7 +228,9 @@ curl -X POST http://127.0.0.1:8000/v1/description-jobs/case-123/classification \
 
 ## Callback Contract
 
-После генерации описания сервис отправляет callback во внешний backend.
+После завершения обработки сервис отправляет callback во внешний backend.
+В обычном режиме callback содержит итоговое описание после генерации. В режиме
+`features_only=true` callback отправляется сразу после расчёта признаков.
 
 ### Запрос
 
@@ -230,6 +247,9 @@ Content-Type: application/json
   "status": "completed",
   "description": "Клиническое описание...",
   "important_labels": ["shape:неправильная"],
+  "all_labels": ["shape:неправильная", "borders:фестончатые"],
+  "bucketed_labels": ["bucket_shape:неправильная", "bucket_borders:фестончатые"],
+  "features_only": false,
   "error": null
 }
 ```
@@ -239,6 +259,30 @@ Content-Type: application/json
 - если `CALLBACK_URL` не задан, callback не выполняется
 - если callback успешен, для задачи выставляется `callback_sent=true`
 - если callback завершается ошибкой, задача переводится в `error`
+
+## Семантика признаков
+
+Сервис отдает три связанных набора признаков:
+
+- `important_labels`: наиболее значимые признаки после ranking-модели;
+  используются как основной контекст для генерации описания
+- `all_labels`: полный список категориальных лейблов в формате
+  `feature:value`
+- `bucketed_labels`: полный список в bucket-формате
+  `bucket_<feature>:value`
+
+Типовые группы признаков:
+
+- форма и размер: `shape`, `elongation`, `eccentricity`, `area`, `perimeter`
+- границы и контур: `borders`, `asymmetry`, `rim`, `fractal_dimension`,
+  `convexity`, `solidity`, `extent`, `radial_variance`,
+  `perimeter_area_ratio`
+- цветовой паттерн: `contrast`, `palette`, `pigmentation`,
+  `color_homogeneity`, `dominant_hue`, `color_distance_euclidean`,
+  `color_balance_*`, `delta_*`, `percent_*`, `entropy_*`, `std_*`,
+  `mean_*`
+- текстура и структура: `texture`, `texture_coarseness`, `structure_order`,
+  `glcm_*`, `lbp_*`, `lobulation`
 
 ## Переменные окружения
 

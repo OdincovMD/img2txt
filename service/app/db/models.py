@@ -20,6 +20,9 @@ class DescriptionJob(Base):
     job_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     important_labels: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    all_labels: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    bucketed_labels: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    features_only: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     classification: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -31,4 +34,3 @@ class DescriptionJob(Base):
         onupdate=utc_now,
         nullable=False,
     )
-

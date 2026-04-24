@@ -7,7 +7,7 @@ from uuid import uuid4
 
 from service.app.core import callback, storage
 from service.app.core.config import settings
-from service.app.pipeline import extract_important_labels_from_mask, generate_description_text
+from service.app.pipeline import extract_label_result_from_mask, generate_description_text
 
 
 def _safe_suffix(filename: str | None, fallback: str) -> str:
@@ -28,6 +28,8 @@ def maybe_generate_and_callback(job_id: str) -> None:
     if not job:
         return
     if not job.get("important_labels") or not job.get("classification"):
+        return
+    if job.get("features_only"):
         return
     if job.get("status") == "completed":
         return
@@ -53,6 +55,7 @@ def extract_features_task(
     mask_bytes: bytes,
     image_name: str | None,
     mask_name: str | None,
+    features_only: bool = False,
 ) -> None:
     prefix = f"{job_id}-{uuid4().hex}"
     tmp_dir = Path(settings.tmp_dir)
@@ -64,9 +67,18 @@ def extract_features_task(
     try:
         image_path.write_bytes(image_bytes)
         mask_path.write_bytes(mask_bytes)
-        important_labels = extract_important_labels_from_mask(image_path, mask_path)
-        storage.save_features(job_id, important_labels)
-        maybe_generate_and_callback(job_id)
+        label_result = extract_label_result_from_mask(image_path, mask_path)
+        storage.save_features(
+            job_id,
+            label_result["important_labels"],
+            all_labels=label_result["all_labels"],
+            bucketed_labels=label_result["bucketed_labels"],
+            features_only=features_only,
+        )
+        if features_only:
+            callback.send_callback(job_id)
+        else:
+            maybe_generate_and_callback(job_id)
     except Exception as exc:
         storage.save_error(job_id, str(exc))
         try:

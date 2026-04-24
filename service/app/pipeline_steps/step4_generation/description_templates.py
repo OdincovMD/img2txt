@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Dict
+from typing import Any, Dict
 
-from service.app.schemas.classification import ClassificationResult
+from service.app.schemas.classification import iter_prompt_lines
 
 # Clinical descriptions for all 24 active labels.
 # Each entry: (category, russian_name, {value: clinical_text})
@@ -274,16 +274,16 @@ def format_grouped_features(grouped: Dict[str, list[tuple[str, str]]]) -> str:
     return "\n\n".join(sections)
 
 
-def format_classification(classification: ClassificationResult) -> str:
+def format_classification(classification: dict[str, Any]) -> str:
     """Format classification block for the prompt."""
     lines = ["КЛАССИФИКАЦИЯ ОБРАЗОВАНИЯ:"]
-    lines.extend(classification.iter_prompt_lines())
+    lines.extend(iter_prompt_lines(classification))
     return "\n".join(lines)
 
 
 def build_messages(
     grouped_features: Dict[str, list[tuple[str, str]]],
-    classification: ClassificationResult | None,
+    classification: dict[str, Any] | None,
 ) -> list[dict[str, str]]:
     messages: list[dict[str, str]] = [{"role": "system", "content": SYSTEM_PROMPT}]
     for example in FEW_SHOT_EXAMPLES:

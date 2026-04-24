@@ -15,6 +15,9 @@ def _payload_from_job(job: dict[str, Any]) -> dict[str, Any]:
         "status": job.get("status"),
         "description": job.get("description"),
         "important_labels": job.get("important_labels") or [],
+        "all_labels": job.get("all_labels") or [],
+        "bucketed_labels": job.get("bucketed_labels") or [],
+        "features_only": bool(job.get("features_only")),
         "error": job.get("error"),
     }
 

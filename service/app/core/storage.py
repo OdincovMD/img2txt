@@ -17,14 +17,27 @@ def get_job(job_id: str) -> dict[str, Any] | None:
         return repository.get_job(session, job_id)
 
 
-def upsert_received(job_id: str) -> dict[str, Any]:
+def upsert_received(job_id: str, features_only: bool = False) -> dict[str, Any]:
     with db_session.SessionLocal() as session:
-        return repository.upsert_received(session, job_id)
+        return repository.upsert_received(session, job_id, features_only=features_only)
 
 
-def save_features(job_id: str, important_labels: list[str]) -> dict[str, Any]:
+def save_features(
+    job_id: str,
+    important_labels: list[str],
+    all_labels: list[str] | None = None,
+    bucketed_labels: list[str] | None = None,
+    features_only: bool = False,
+) -> dict[str, Any]:
     with db_session.SessionLocal() as session:
-        return repository.save_features(session, job_id, important_labels)
+        return repository.save_features(
+            session,
+            job_id,
+            important_labels,
+            all_labels=all_labels,
+            bucketed_labels=bucketed_labels,
+            features_only=features_only,
+        )
 
 
 def save_classification(job_id: str, classification: dict[str, Any]) -> dict[str, Any]:

@@ -1,85 +1,31 @@
-"""Typed classification payloads for clinical description generation."""
+"""Helpers for classification payloads used in description generation."""
 
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import Iterable
+from __future__ import annotations
 
-
-class DisplayEnum(str, Enum):
-    """Enum whose string value is already user-facing display text."""
-
-    def __str__(self) -> str:
-        return self.value
+from typing import Any, Iterable, Mapping
 
 
-class FeatureType(DisplayEnum):
-    """Тип выявленных признаков в образовании."""
-    SINGLE = "Один признак"
-    MULTIPLE = "Несколько признаков"
+def normalize_classification_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    properties = payload.get("properties") or []
+    return {
+        "feature_type": str(payload.get("feature_type") or "").strip(),
+        "structure": str(payload.get("structure") or "").strip(),
+        "properties": [str(item).strip() for item in properties if str(item).strip()],
+        "final_class": str(payload.get("final_class") or "").strip(),
+    }
 
 
-class Structure(DisplayEnum):
-    """Основная структура образования."""
-    STRUCTURELESS = "Бесструктурная область"
-    GLOBULES = "Комки"
-    LINES = "Линии"
-    DOTS = "Точки"
-    CIRCLES = "Круги"
-    PSEUDOPODIA = "Псевдоподии"
+def property_text(classification: Mapping[str, Any], fallback: str = "-") -> str:
+    properties = classification.get("properties") or []
+    values = [str(item).strip() for item in properties if str(item).strip()]
+    return ", ".join(values) if values else fallback
 
 
-class LineType(DisplayEnum):
-    """Тип линий (если структура = LINES)."""
-    CURVED = "Изогнутые"
-    PARALLEL = "Параллельные"
-    RETICULAR = "Ретикулярные"
-    BRANCHED = "Разветвленные"
+def iter_prompt_lines(classification: Mapping[str, Any]) -> Iterable[str]:
+    yield f"- Тип признаков: {str(classification.get('feature_type') or '').strip()}"
+    yield f"- Структура: {str(classification.get('structure') or '').strip()}"
+    yield f"- Свойства: {property_text(classification)}"
 
-
-class CountColor(DisplayEnum):
-    """Количество цветов в образовании."""
-    ONE = "Один цвет"
-    MANY = "Несколько цветов"
-
-
-class PigmentType(DisplayEnum):
-    """Тип пигмента."""
-    MELANIN = "Меланин"
-    OTHER = "Другой пигмент"
-
-
-class Symmetry(DisplayEnum):
-    """Симметричность образования."""
-    SYMMETRIC = "Симметричные"
-    ASYMMETRIC = "Асимметричные"
-
-
-@dataclass
-class ClassificationResult:
-    """
-    Результат классификации дерматоскопического образования.
-
-    Используется как опциональный входной параметр для generate_description().
-    Если не предоставлен, описание генерируется только на основе важных признаков.
-    """
-    feature_type: FeatureType
-    structure: Structure
-    properties: list[str] = field(default_factory=list)
-    final_class: str = ""
-
-    def __post_init__(self) -> None:
-        self.properties = [str(item).strip() for item in self.properties if str(item).strip()]
-        self.final_class = self.final_class.strip()
-
-    def has_properties(self) -> bool:
-        return bool(self.properties)
-
-    def property_text(self, fallback: str = "—") -> str:
-        return ", ".join(self.properties) if self.properties else fallback
-
-    def iter_prompt_lines(self) -> Iterable[str]:
-        yield f"- Тип признаков: {self.feature_type.value}"
-        yield f"- Структура: {self.structure.value}"
-        yield f"- Свойства: {self.property_text()}"
-        if self.final_class:
-            yield f"- Финальная классификация: {self.final_class}"
+    final_class = str(classification.get("final_class") or "").strip()
+    if final_class:
+        yield f"- Финальная классификация: {final_class}"

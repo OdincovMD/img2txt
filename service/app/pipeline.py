@@ -15,15 +15,11 @@ from service.app.pipeline_steps.step1_features.features import (
     extract_shape_features,
     extract_texture_features,
 )
-from service.app.pipeline_steps.step2_bucketing.bucketing import row_to_bucket_columns
+from service.app.pipeline_steps.step2_bucketing.bucketing import bucket_columns_from_labels, row_to_labels
 from service.app.pipeline_steps.step3_ranking.ranking import rank_important_labels
 from service.app.pipeline_steps.step4_generation.description import generate_description_from_labels
-from service.app.schemas.classification import (
-    ClassificationResult,
-    FeatureType,
-    Structure,
-)
 from service.app.core.config import settings
+from service.app.schemas.classification import normalize_classification_payload
 
 
 def _read_mask(mask_path: str | Path, expected_shape: tuple[int, int]) -> Any:
@@ -40,19 +36,36 @@ def _read_mask(mask_path: str | Path, expected_shape: tuple[int, int]) -> Any:
     return binary
 
 
-def extract_important_labels_from_mask(
+def _label_entries(labels: dict[str, str]) -> list[str]:
+    return [f"{key}:{value}" for key, value in labels.items()]
+
+
+def extract_label_result_from_mask(
     image_path: str | Path,
     mask_path: str | Path,
-) -> list[str]:
+) -> dict[str, list[str]]:
     image = _load_image_bgr(image_path)
     mask = _read_mask(mask_path, image.shape[:2])
     features = extract_features(image, mask)
-    buckets = row_to_bucket_columns(features)
-    return rank_important_labels(
+    labels = row_to_labels(features)
+    buckets = bucket_columns_from_labels(labels)
+    important_labels = rank_important_labels(
         {**features, **buckets},
         importance_model_path=settings.importance_checkpoint_path,
         k=settings.top_k,
     )
+    return {
+        "important_labels": important_labels,
+        "all_labels": _label_entries(labels),
+        "bucketed_labels": _label_entries(buckets),
+    }
+
+
+def extract_important_labels_from_mask(
+    image_path: str | Path,
+    mask_path: str | Path,
+) -> list[str]:
+    return extract_label_result_from_mask(image_path, mask_path)["important_labels"]
 
 
 def _load_image_bgr(image_path: str | Path) -> Any:
@@ -72,17 +85,8 @@ def extract_features(image: Any, mask: Any) -> dict[str, Any]:
     return merge_with_composite_features(features)
 
 
-def normalize_classification(payload: dict[str, Any]) -> ClassificationResult:
-    feature_type = FeatureType(payload["feature_type"])
-    structure = Structure(payload["structure"])
-    properties = payload.get("properties") or []
-    final_class = payload.get("final_class") or ""
-    return ClassificationResult(
-        feature_type=feature_type,
-        structure=structure,
-        properties=[str(item) for item in properties],
-        final_class=str(final_class),
-    )
+def normalize_classification(payload: dict[str, Any]) -> dict[str, Any]:
+    return normalize_classification_payload(payload)
 
 
 def generate_description_text(

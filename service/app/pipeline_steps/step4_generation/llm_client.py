@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import os
-from typing import Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 from dotenv import load_dotenv
 from openai import OpenAI
 
-from service.app.schemas.classification import ClassificationResult
 from service.app.pipeline_steps.step4_generation.description_templates import format_classification
 
 load_dotenv()
@@ -32,12 +31,12 @@ def _get_client() -> OpenAI:
     return _client
 
 
-def _build_single_prompt(features_text: str, classification: ClassificationResult | str | None) -> str:
+def _build_single_prompt(features_text: str, classification: dict[str, Any] | str | None) -> str:
     prompt = "Составь клиническое дерматоскопическое описание по следующим данным:\n\n"
     prompt += features_text.strip()
     if classification is None:
         return prompt
-    if isinstance(classification, ClassificationResult):
+    if isinstance(classification, dict):
         classification_text = format_classification(classification)
     else:
         classification_text = str(classification).strip()
@@ -48,7 +47,7 @@ def _build_single_prompt(features_text: str, classification: ClassificationResul
 
 def _normalize_messages(
     features_text: str | Sequence[Mapping[str, str]],
-    classification: ClassificationResult | str | None,
+    classification: dict[str, Any] | str | None,
 ) -> list[dict[str, str]]:
     if isinstance(features_text, str):
         from service.app.pipeline_steps.step4_generation.description_templates import SYSTEM_PROMPT
@@ -66,7 +65,7 @@ def _normalize_messages(
 
 def generate_description(
     features_text: str | Sequence[Mapping[str, str]],
-    classification: ClassificationResult | str | None = None,
+    classification: dict[str, Any] | str | None = None,
     model: str = DEFAULT_MODEL,
     max_tokens: int = 800,
 ) -> str:

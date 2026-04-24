@@ -2,17 +2,18 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from service.app.pipeline_steps.step4_generation.description_templates import (
     build_messages,
     parse_feature_entries,
 )
 from service.app.pipeline_steps.step4_generation.llm_client import generate_description
-from service.app.schemas.classification import ClassificationResult
 
 
 def generate_description_from_labels(
     important_labels: list[str],
-    classification: ClassificationResult,
+    classification: dict[str, Any],
     model_name: str,
     max_tokens: int = 800,
 ) -> str:

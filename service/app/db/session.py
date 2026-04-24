@@ -44,4 +44,3 @@ def init_db() -> None:
     from service.app.db import models  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
-
