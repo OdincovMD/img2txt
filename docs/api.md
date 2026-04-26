@@ -87,8 +87,8 @@ curl -X POST http://127.0.0.1:8000/v1/description-jobs \
   -H "X-Service-Token: <SERVICE_API_TOKEN>" \
   -F "job_id=case-123" \
   -F "features_only=false" \
-  -F "image=@./test_images/100.jpg" \
-  -F "mask=@./test_images/100_mask.jpg"
+  -F "image=@./image.jpg" \
+  -F "mask=@./mask.jpg"
 ```
 
 ### Ответ
