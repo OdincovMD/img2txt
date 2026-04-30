@@ -9,6 +9,8 @@ services:
       - service/.env
     expose:
       - "8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./model/checkpoints:/app/model/checkpoints:ro
       - description_data:/data

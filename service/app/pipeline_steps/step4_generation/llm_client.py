@@ -1,21 +1,33 @@
-"""Groq-backed LLM client for clinical description generation."""
+"""OpenAI-compatible LLM client for clinical description generation."""
 
 from __future__ import annotations
 
-import os
 from typing import Any, Mapping, Sequence
 
-from dotenv import load_dotenv
+import httpx
 from openai import OpenAI
 
+from service.app.core.config import settings
 from service.app.pipeline_steps.step4_generation.description_templates import format_classification
 
-load_dotenv()
-
-GROQ_BASE_URL = "https://api.groq.com/openai/v1"
-DEFAULT_MODEL = "openai/gpt-oss-120b"
-
 _client: OpenAI | None = None
+_http_client: httpx.Client | None = None
+
+
+def _build_http_client() -> httpx.Client:
+    global _http_client
+    if _http_client is not None:
+        return _http_client
+
+    client_kwargs: dict[str, Any] = {
+        "timeout": settings.llm_timeout_seconds,
+        "trust_env": True,
+    }
+    if settings.llm_proxy_url:
+        client_kwargs["proxy"] = settings.llm_proxy_url
+
+    _http_client = httpx.Client(**client_kwargs)
+    return _http_client
 
 
 def _get_client() -> OpenAI:
@@ -23,11 +35,17 @@ def _get_client() -> OpenAI:
     if _client is not None:
         return _client
 
-    api_key = os.environ.get("GROQ_API_KEY")
+    api_key = settings.llm_api_key
     if not api_key:
-        raise RuntimeError("GROQ_API_KEY is not set. Add it to .env or the environment.")
+        raise RuntimeError(
+            "LLM API key is not set. Define LLM_API_KEY, OPENAI_API_KEY, or GROQ_API_KEY."
+        )
 
-    _client = OpenAI(api_key=api_key, base_url=GROQ_BASE_URL)
+    _client = OpenAI(
+        api_key=api_key,
+        base_url=settings.llm_base_url,
+        http_client=_build_http_client(),
+    )
     return _client
 
 
@@ -66,13 +84,13 @@ def _normalize_messages(
 def generate_description(
     features_text: str | Sequence[Mapping[str, str]],
     classification: dict[str, Any] | str | None = None,
-    model: str = DEFAULT_MODEL,
+    model: str | None = None,
     max_tokens: int = 800,
 ) -> str:
-    """Generate one Russian clinical description via Groq."""
+    """Generate one Russian clinical description via an OpenAI-compatible API."""
     messages = _normalize_messages(features_text, classification)
     response = _get_client().chat.completions.create(
-        model=model,
+        model=model or settings.description_model,
         messages=messages,
         temperature=0.3,
         top_p=0.85,

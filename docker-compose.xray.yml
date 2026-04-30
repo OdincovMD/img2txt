@@ -1,0 +1,21 @@
+services:
+  xray_proxy:
+    image: ghcr.io/xtls/xray-core:latest
+    restart: unless-stopped
+    command:
+      - run
+      - -c
+      - /etc/xray/config.json
+    ports:
+      - "127.0.0.1:${XRAY_HTTP_PORT:-10809}:10809"
+      - "127.0.0.1:${XRAY_SOCKS_PORT:-10808}:10808"
+    volumes:
+      - ./infra/xray/config.json:/etc/xray/config.json:ro
+    networks:
+      - skin-ai-network
+
+  description_service:
+    depends_on:
+      - xray_proxy
+    environment:
+      LLM_PROXY_URL: http://xray_proxy:10809

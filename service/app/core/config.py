@@ -4,6 +4,14 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+
+# Load service/.env before settings are materialized so local runs behave the
+# same way as Docker env_file-based runs.
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 
 def _get_int(name: str, default: int) -> int:
@@ -36,6 +44,17 @@ class Settings:
         "DESCRIPTION_MODEL",
         "openai/gpt-oss-120b",
     )
+    llm_api_key: str = (
+        os.environ.get("LLM_API_KEY")
+        or os.environ.get("OPENAI_API_KEY")
+        or os.environ.get("GROQ_API_KEY", "")
+    )
+    llm_base_url: str = os.environ.get(
+        "LLM_BASE_URL",
+        "https://api.groq.com/openai/v1",
+    )
+    llm_proxy_url: str = os.environ.get("LLM_PROXY_URL", "")
+    llm_timeout_seconds: int = _get_int("LLM_TIMEOUT_SECONDS", 60)
     callback_timeout_seconds: int = _get_int("CALLBACK_TIMEOUT_SECONDS", 15)
 
 

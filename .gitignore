@@ -30,3 +30,4 @@ images/
 .codex
 .claude/
 test_images/
+infra/xray/config.json
