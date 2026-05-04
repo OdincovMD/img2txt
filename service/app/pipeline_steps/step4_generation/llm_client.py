@@ -85,16 +85,34 @@ def generate_description(
     features_text: str | Sequence[Mapping[str, str]],
     classification: dict[str, Any] | str | None = None,
     model: str | None = None,
-    max_tokens: int = 800,
+    max_tokens: int = 2048,
 ) -> str:
     """Generate one Russian clinical description via an OpenAI-compatible API."""
     messages = _normalize_messages(features_text, classification)
-    response = _get_client().chat.completions.create(
-        model=model or settings.description_model,
-        messages=messages,
-        temperature=0.3,
-        top_p=0.85,
-        max_tokens=max_tokens,
-    )
-    content = response.choices[0].message.content
-    return (content or "").strip()
+    token_budget = max(1024, max_tokens)
+
+    for attempt in range(2):
+        response = _get_client().chat.completions.create(
+            model=model or settings.description_model,
+            messages=messages,
+            temperature=0.3,
+            top_p=0.85,
+            max_completion_tokens=token_budget,
+            extra_body={
+                "reasoning_effort": "low",
+                "include_reasoning": False,
+            },
+        )
+        choice = response.choices[0]
+        content = (choice.message.content or "").strip()
+        finish_reason = getattr(choice, "finish_reason", None)
+
+        if finish_reason != "length" and (not content or not content[-1].isalnum()):
+            return content
+
+        if attempt == 1:
+            return content
+
+        token_budget = max(token_budget * 2, 4096)
+
+    return ""

@@ -15,7 +15,7 @@ def generate_description_from_labels(
     important_labels: list[str],
     classification: dict[str, Any],
     model_name: str,
-    max_tokens: int = 800,
+    max_tokens: int = 2048,
 ) -> str:
     if not important_labels:
         return "Недостаточно данных для описания."

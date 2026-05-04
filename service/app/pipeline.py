@@ -98,5 +98,5 @@ def generate_description_text(
         important_labels,
         classification,
         model_name=settings.description_model,
-        max_tokens=800,
+        max_tokens=2048,
     )
